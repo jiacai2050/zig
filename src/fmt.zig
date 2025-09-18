@@ -323,7 +323,8 @@ fn fmtPathDir(
 
         if (mem.startsWith(u8, entry.name, ".")) continue;
 
-        if (is_dir or entry.kind == .file and (mem.endsWith(u8, entry.name, ".zig") or mem.endsWith(u8, entry.name, ".zon"))) {
+        const is_zig_or_zon = entry.kind == .file and (mem.endsWith(u8, entry.name, ".zig") or mem.endsWith(u8, entry.name, ".zon"));
+        if (is_dir or is_zig_or_zon) {
             const full_path = try fs.path.join(fmt.gpa, &[_][]const u8{ file_path, entry.name });
             defer fmt.gpa.free(full_path);
 

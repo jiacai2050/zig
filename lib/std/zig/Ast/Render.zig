@@ -1483,9 +1483,9 @@ fn renderThenElse(
             last_else_token = error_token + 1; // |
         }
 
-        const indent_else_expr = indent_then_expr and
+        const indent_else_expr = (indent_then_expr and
             !nodeIsBlock(tree.nodeTag(else_expr)) and
-            !nodeIsIfForWhileSwitch(tree.nodeTag(else_expr)) or
+            !nodeIsIfForWhileSwitch(tree.nodeTag(else_expr))) or
             tree.tokenTag(tree.firstToken(else_expr)) ==
                 .multiline_string_literal_line;
         if (indent_else_expr) {
@@ -3195,7 +3195,7 @@ fn renderComments(r: *Render, start: usize, end: usize) Error!bool {
             }
         }
 
-        index = 1 + (newline orelse end - 1);
+        index = 1 + (newline orelse (end - 1));
 
         const comment_content = mem.trimStart(u8, trimmed_comment["//".len..], &std.ascii.whitespace);
         if (ais.disabled_offset != null and mem.eql(u8, comment_content, "zig fmt: on")) {

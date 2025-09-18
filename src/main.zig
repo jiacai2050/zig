@@ -3524,7 +3524,7 @@ fn buildOutputType(
     };
 
     const thread_limit = @min(
-        @max(n_jobs orelse std.Thread.getCpuCount() catch 1, 1),
+        @max(n_jobs orelse (std.Thread.getCpuCount() catch 1), 1),
         std.math.maxInt(Zcu.PerThread.IdBacking),
     );
     try setThreadLimit(arena, thread_limit);
