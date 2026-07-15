@@ -9,12 +9,9 @@ test "ambiguous precedence" {
     const y: u8 = 0;
     const z: u8 = 0;
     
-    // We might expect the line below to parse something like:
-    //   `makeBool(x) orelse (y != z)`
-    // but we might elsewhere want something like 
-    //   `(nullable(x) orelse y) != w`
-    // to perform a fallback and then a check, either way its 
-    // not obvious the behavior so we get an error
+    // Without parentheses the compiler cannot distinguish between two conflicting interpretations:
+    // 1. Compare on the value which may be recovered: (makeBool(x) orelse y) != z
+    // 2. Recover to the result of the comparison:     makeBool(x) orelse (y != z)
     _ = makeBool(x) orelse y != z;
 }
 
