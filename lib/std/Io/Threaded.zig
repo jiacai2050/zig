@@ -2868,10 +2868,14 @@ fn batchAwaitConcurrent(userdata: ?*anyopaque, b: *Io.Batch, timeout: Io.Timeout
         }
     } = .{ .gpa = t.allocator, .batch = b, .slice = &poll_buffer, .len = 0 };
     {
+        var prev_index: Io.Operation.OptionalIndex = .none;
         var index = b.submitted.head;
         while (index != .none) {
             const storage = &b.storage[index.toIndex()];
             const submission = storage.submission;
+            const next_index = submission.node.next;
+            defer index = next_index;
+
             switch (submission.operation) {
                 .file_read_streaming => |o| try poll_storage.add(o.file.handle, posix.POLL.IN | posix.POLL.ERR),
                 .file_write_streaming => |o| try poll_storage.add(o.file.handle, posix.POLL.OUT | posix.POLL.ERR),
@@ -2891,12 +2895,18 @@ fn batchAwaitConcurrent(userdata: ?*anyopaque, b: *Io.Batch, timeout: Io.Timeout
                         };
                         data_i += msg.data.len;
                     } else .{ null, o.message_buffer.len } };
+                    switch (prev_index) {
+                        .none => b.submitted.head = next_index,
+                        else => b.storage[prev_index.toIndex()].submission.node.next = next_index,
+                    }
+                    if (next_index == .none) b.submitted.tail = prev_index;
                     switch (b.completed.tail) {
                         .none => b.completed.head = index,
                         else => |tail_index| b.storage[tail_index.toIndex()].completion.node.next = index,
                     }
-                    storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
                     b.completed.tail = index;
+                    storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
+                    continue;
                 },
                 .net_send => |*o| nb: {
                     const result: Io.Operation.Result = .{
@@ -2920,18 +2930,24 @@ fn batchAwaitConcurrent(userdata: ?*anyopaque, b: *Io.Batch, timeout: Io.Timeout
                             break :o .{ null, sent };
                         },
                     };
+                    switch (prev_index) {
+                        .none => b.submitted.head = next_index,
+                        else => b.storage[prev_index.toIndex()].submission.node.next = next_index,
+                    }
+                    if (next_index == .none) b.submitted.tail = prev_index;
                     switch (b.completed.tail) {
                         .none => b.completed.head = index,
                         else => |tail_index| b.storage[tail_index.toIndex()].completion.node.next = index,
                     }
-                    storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
                     b.completed.tail = index;
+                    storage.* = .{ .completion = .{ .node = .{ .next = .none }, .result = result } };
+                    continue;
                 },
                 .net_accept => |o| try poll_storage.add(o.socket_handle, posix.POLL.IN | posix.POLL.ERR),
                 .net_read => |o| try poll_storage.add(o.socket_handle, posix.POLL.IN | posix.POLL.ERR),
                 .net_write => |o| try poll_storage.add(o.socket_handle, posix.POLL.OUT | posix.POLL.ERR),
             }
-            index = submission.node.next;
+            prev_index = index;
         }
     }
     switch (poll_storage.len) {
