@@ -24,6 +24,7 @@ nodes: Ast.NodeList,
 extra_data: std.ArrayList(u32),
 scratch: std.ArrayList(Node.Index),
 recover: bool,
+use_old_precedence: bool = false,
 
 fn tokenTag(p: *const Parse, token_index: TokenIndex) Token.Tag {
     return p.tokens.items(.tag)[token_index];
@@ -1531,6 +1532,8 @@ const PrecClass = struct {
     const Group = enum {
         const num_distinct = std.meta.fieldNames(Group).len;
 
+        top,
+
         arithmetic_product_chainable,
         arithmetic_mod_nonchainable,
         arithmetic_sum,
@@ -1588,7 +1591,7 @@ const PrecClass = struct {
         gt = 1,
 
         fn inverted(self: Rel) Rel {
-            return @enumFromInt(-@intFromEnum(self));
+            return @fromBackingInt(@intCast(-@backingInt(self)));
         }
     };
 
@@ -1602,12 +1605,14 @@ const PrecClass = struct {
                 if (!std.mem.startsWith(u8, fieldname_j, @tagName(major_b))) continue;
 
                 prec_array.*[i][j] = rel;
+                prec_array.*[j][i] = rel.inverted();
             }
         }
     }
 
     fn setMinorRelation(prec_array: *PrecedenceArray, minor_a: Group, rel: Rel, minor_b: Group) void {
-        prec_array.*[@intFromEnum(minor_a)][@intFromEnum(minor_b)] = rel;
+        prec_array.*[@backingInt(minor_a)][@backingInt(minor_b)] = rel;
+        prec_array.*[@backingInt(minor_b)][@backingInt(minor_a)] = rel.inverted();
     }
 
     /// Arithmetic_* > Comparison
@@ -1622,6 +1627,9 @@ const PrecClass = struct {
         @setEvalBranchQuota(20_000);
         const major_greater_than_relations = [_][2]Group.Major{
             // zig fmt: off
+            .{ .top,        .arithmetic },
+            .{ .top,        .bitwise },
+            .{ .top,        .recovery },
             .{ .arithmetic, .comparison },
             .{ .bitwise,    .comparison },
             .{ .comparison, .bool },
@@ -1656,30 +1664,21 @@ const PrecClass = struct {
 
         var order: PrecedenceArray = @splat(@splat(null));
 
+        setMinorRelation(&order, .top, .gt, .arithmetic_product_chainable);
+
         setMinorRelation(&order, .arithmetic_product_chainable, .eq, .arithmetic_mod_nonchainable);
         setMinorRelation(&order, .arithmetic_mod_nonchainable, .gt, .arithmetic_sum);
-        setMinorRelation(&order, .arithmetic_product_chainable, .gt, .arithmetic_sum);
 
         setMinorRelation(&order, .arithmetic_sum, .gt, .bitwise_shift);
 
-        // Here since the transative ordering computer cant leverage equals to derive a = b < c --> a < c, we have to manually list these
         setMinorRelation(&order, .bitwise_shift, .gt, .bitwise_and);
-        setMinorRelation(&order, .bitwise_shift, .gt, .bitwise_xor);
-        setMinorRelation(&order, .bitwise_shift, .gt, .bitwise_or);
-        setMinorRelation(&order, .bitwise_shift, .gt, .recovery_catch);
-        setMinorRelation(&order, .bitwise_shift, .gt, .recovery_orelse);
 
         setMinorRelation(&order, .bitwise_and, .eq, .bitwise_xor);
-        setMinorRelation(&order, .bitwise_xor, .eq, .bitwise_or);
-        setMinorRelation(&order, .bitwise_or, .eq, .recovery_catch);
-        setMinorRelation(&order, .recovery_catch, .eq, .recovery_orelse);
-        setMinorRelation(&order, .recovery_orelse, .eq, .bitwise_and);
+        setMinorRelation(&order, .bitwise_and, .eq, .bitwise_or);
+        setMinorRelation(&order, .bitwise_and, .eq, .recovery_catch);
+        setMinorRelation(&order, .bitwise_and, .eq, .recovery_orelse);
 
         setMinorRelation(&order, .bitwise_and, .gt, .comparison);
-        setMinorRelation(&order, .bitwise_xor, .gt, .comparison);
-        setMinorRelation(&order, .bitwise_or, .gt, .comparison);
-        setMinorRelation(&order, .recovery_catch, .gt, .comparison);
-        setMinorRelation(&order, .recovery_orelse, .gt, .comparison);
 
         setMinorRelation(&order, .comparison, .gt, .bool_and);
 
@@ -1697,16 +1696,22 @@ const PrecClass = struct {
     };
 
     pub fn cmp(lhs: PrecClass, rhs: PrecClass) ?Rel {
-        return PrecClass.precedence_ordering[@intFromEnum(lhs.group)][@intFromEnum(rhs.group)];
+        return PrecClass.precedence_ordering[@backingInt(lhs.group)][@backingInt(rhs.group)];
     }
 
     pub fn v16_cmp(lhs: PrecClass, rhs: PrecClass) Rel {
-        return PrecClass.v16_precedence_ordering[@intFromEnum(lhs.group)][@intFromEnum(rhs.group)].?;
+        return PrecClass.v16_precedence_ordering[@backingInt(lhs.group)][@backingInt(rhs.group)].?;
     }
 
     fn computeTransativeOrdering(order: *PrecedenceArray) void {
         for (0..Group.num_distinct) |i| for (0..Group.num_distinct) |j| for (0..Group.num_distinct) |k| {
-            if (order[i][k] == order[k][j] and order[i][k] != null) order[i][j] = order[i][k];
+            if (order[i][j] == null or order[j][k] == null) continue;
+            // X < Y < Z ==> X < Z         X > Y > Z ==> X > Z
+            if (order[i][j] == order[j][k]) order[i][k] = order[i][j];
+            // X = Y < Z ==> X < Z         X = Y > Z ==> X > Z
+            if (order[i][j] == .eq) order[i][k] = order[j][k];
+            // X < Y = Z ==> X < Z         X > Y = Z ==> X > Z
+            if (order[j][k] == .eq) order[i][k] = order[i][j];
         };
         for (0..Group.num_distinct) |i| for (0..Group.num_distinct) |j| {
             if (i == j) order[i][j] = .eq;
@@ -1762,6 +1767,23 @@ const operTable = std.enums.directEnumArrayDefault(Token.Tag, OperInfo, .{ .prec
     // zig fmt: on
 });
 
+fn comptimePrecedenceFromNodeTag(comptime tag: Node.Tag) PrecClass {
+    for (operTable) |data| {
+        if (data.tag == tag) return data.prec;
+    }
+    return .{ .group = .top, .assoc = .left };
+}
+
+pub fn precedenceFromNodeTag(tag: Node.Tag) PrecClass {
+    return switch (tag) {
+        inline else => |ct_tag| comptimePrecedenceFromNodeTag(ct_tag),
+    };
+}
+
+pub fn newPrecedenceBetween(left_tok: Node.Tag, right_tok: Node.Tag) ?PrecClass.Rel {
+    return precedenceFromNodeTag(left_tok).cmp(precedenceFromNodeTag(right_tok));
+}
+
 fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_token_const: u32) Error!?Node.Index {
     var node = try p.parsePrefixExpr() orelse return null;
 
@@ -1769,17 +1791,21 @@ fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_token_const: u32
 
     while (true) {
         const tok_tag = p.tokenTag(p.tok_i);
-        const info = operTable[@intFromEnum(tok_tag)];
+        const info = operTable[@backingInt(tok_tag)];
 
-        const rel = info.prec.cmp(min_exc_prec) orelse b: {
+        const prec_relation = if (!p.use_old_precedence) info.prec.cmp(min_exc_prec) else info.prec.v16_cmp(min_exc_prec);
+        const rel = prec_relation orelse b: {
+            // This issues warnings if the relation is null, which it never is in 0.16.0
             const prev_op_tok_tag = p.tokenTag(prev_operator_token);
-            const prev_op_info = operTable[@intFromEnum(prev_op_tok_tag)];
+            const prev_op_info = operTable[@backingInt(prev_op_tok_tag)];
             const v16_rel = prev_op_info.prec.v16_cmp(info.prec);
             try p.warnMsg(.{
                 .tag = .ambiguous_operator_precedence,
                 .is_note = false,
                 .token = p.tok_i,
-                .extra = .{ .offset = p.tok_i - prev_operator_token },
+                .extra = .{
+                    .offset = p.tok_i - prev_operator_token,
+                },
             });
             try p.warnMsg(.{
                 .tag = .previous_ambiguous_operator,
@@ -1791,14 +1817,18 @@ fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_token_const: u32
                     .tag = .hint_operator_precedence_left,
                     .is_note = true,
                     .token = p.tok_i,
-                    .extra = .{ .offset = p.tok_i - prev_operator_token },
+                    .extra = .{
+                        .offset = p.tok_i - prev_operator_token,
+                    },
                 });
             } else {
                 try p.warnMsg(.{
                     .tag = .hint_operator_precedence_right,
                     .is_note = true,
                     .token = p.tok_i,
-                    .extra = .{ .offset = p.tok_i - prev_operator_token },
+                    .extra = .{
+                        .offset = p.tok_i - prev_operator_token,
+                    },
                 });
             }
             break :b .gt;
@@ -1812,12 +1842,15 @@ fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_token_const: u32
             //Special cased check to maintain the old more helpful error for chained comparisons.
             if (info.prec.group == .comparison) {
                 try p.warn(.chained_comparison_operators);
-            } else {
+                // In 0.16.0 the only reptition prohibited was comparisons which we checked above
+            } else if (!p.use_old_precedence) {
                 try p.warnMsg(.{
                     .tag = .illegal_chained_operators,
                     .is_note = false,
                     .token = p.tok_i,
-                    .extra = .{ .offset = p.tok_i - prev_operator_token },
+                    .extra = .{
+                        .offset = p.tok_i - prev_operator_token,
+                    },
                 });
                 try p.warnMsg(.{
                     .tag = .previous_ambiguous_operator,
@@ -1828,7 +1861,9 @@ fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_token_const: u32
                     .tag = .hint_operator_precedence_left,
                     .is_note = true,
                     .token = p.tok_i,
-                    .extra = .{ .offset = p.tok_i - prev_operator_token },
+                    .extra = .{
+                        .offset = p.tok_i - prev_operator_token,
+                    },
                 });
             }
         }

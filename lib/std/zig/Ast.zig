@@ -139,10 +139,7 @@ pub fn deinit(tree: *Ast, gpa: Allocator) void {
 }
 
 pub const Mode = enum { zig, zon };
-pub const ParseOptions = struct {
-    recover: bool = true,
-    mode: Mode = .zig,
-};
+pub const ParseOptions = struct { recover: bool = true, mode: Mode = .zig, use_old_precedence: bool = false };
 
 /// Result should be freed with tree.deinit() when there are
 /// no more references to any of the tokens or nodes.
@@ -185,6 +182,7 @@ pub fn parseTokens(
         .scratch = .empty,
         .tok_i = 0,
         .recover = options.recover,
+        .use_old_precedence = options.use_old_precedence,
     };
     defer parser.errors.deinit(gpa);
     defer parser.nodes.deinit(gpa);

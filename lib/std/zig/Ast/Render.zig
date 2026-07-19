@@ -4,6 +4,7 @@ const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const meta = std.meta;
 const Ast = std.zig.Ast;
+const Parse = @import("../../zig/Parse.zig");
 const Token = std.zig.Token;
 const primitives = std.zig.primitives;
 const Writer = std.Io.Writer;
@@ -539,13 +540,43 @@ fn renderExpression(r: *Render, node: Ast.Node.Index, space: Space) Error!void {
         .@"orelse",
         => {
             const lhs, const rhs = tree.nodeData(node).node_and_node;
-            try renderExpression(r, lhs, .space);
-            const op_token = tree.nodeMainToken(node);
+
+            const lhs_tag = tree.nodeTag(lhs);
+            const center_tag = tree.nodeTag(node);
+            const rhs_tag = tree.nodeTag(rhs);
+
+            const lhs_prec = Parse.precedenceFromNodeTag(lhs_tag);
+            const center_prec = Parse.precedenceFromNodeTag(center_tag);
+            const rhs_prec = Parse.precedenceFromNodeTag(rhs_tag);
+
+            const left_rel = lhs_prec.cmp(center_prec);
+            const right_rel = rhs_prec.cmp(center_prec);
+
+            const paren_left = left_rel == null or left_rel == .lt or (left_rel == .eq and lhs_prec.group == center_prec.group and lhs_prec.assoc == .none);
+            const paren_right = right_rel == null or right_rel == .lt;
+
+
+            if (paren_left) try ais.writeByte('(');
+            try renderExpression(r, lhs, .none);
+            if (paren_left) try ais.writeByte(')');
+            // Multiline string literals will eat the space so we need to skip if we thats next.
+            if (tree.tokenTag(tree.lastToken(lhs)) != .multiline_string_literal_line) try renderOnlySpace(r, .space);
+
             try ais.pushIndent(.binop);
+            const op_token = tree.nodeMainToken(node);
             const rhs_seperate_line = !tree.tokensOnSameLine(op_token, op_token + 1) or
                 tree.tokenTag(op_token + 1) == .multiline_string_literal_line;
             try renderToken(r, op_token, if (rhs_seperate_line) .newline else .space);
-            try renderExpression(r, rhs, space);
+
+            if (paren_right) try ais.writeByte('(');
+            try renderExpression(r, rhs, .none);
+            if (paren_right) try ais.writeByte(')');
+
+            const most_recent = tree.lastToken(rhs);
+            const lexeme = tokenSliceForRender(tree, most_recent);
+            // If our space is .none, then the above code functions as normal and putting this here will duplicate comments and such
+            if (space != .none) try renderSpace(r, most_recent, lexeme.len, space);
+
             ais.popIndent();
         },
 

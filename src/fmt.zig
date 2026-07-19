@@ -41,6 +41,7 @@ const Fmt = struct {
     out_buffer: std.Io.Writer.Allocating,
     stdout_writer: *Io.File.Writer,
     stats: ?*Stats,
+    fix_precedence: bool,
 
     const SeenMap = std.AutoHashMap(Io.File.INode, void);
 };
@@ -66,6 +67,7 @@ pub fn run(gpa: Allocator, arena: Allocator, io: Io, args: []const []const u8) !
     var check_ast_flag = false;
     var force_zon = false;
     var enable_stats = false;
+    var fix_precedence = false;
 
     var input_files = std.array_list.Managed([]const u8).init(gpa);
     defer input_files.deinit();
@@ -107,6 +109,8 @@ pub fn run(gpa: Allocator, arena: Allocator, io: Io, args: []const []const u8) !
                     try excluded_files.append(next_arg);
                 } else if (mem.eql(u8, arg, "--zon")) {
                     force_zon = true;
+                } else if (mem.eql(u8, arg, "--upgrade")) {
+                    fix_precedence = true;
                 } else {
                     fatal("unrecognized parameter: {q}", .{arg});
                 }
@@ -198,6 +202,7 @@ pub fn run(gpa: Allocator, arena: Allocator, io: Io, args: []const []const u8) !
         .out_buffer = .init(gpa),
         .stdout_writer = &stdout_writer,
         .stats = null,
+        .fix_precedence = fix_precedence,
     };
     defer fmt.seen.deinit();
     defer fmt.out_buffer.deinit();
@@ -382,7 +387,7 @@ fn fmtPathFile(
         break :mode .zig;
     };
 
-    var tree = try std.zig.Ast.parse(gpa, source_code, .{ .mode = mode });
+    var tree = try std.zig.Ast.parse(gpa, source_code, .{ .mode = mode, .use_old_precedence = fmt.fix_precedence });
     defer tree.deinit(gpa);
 
     if (tree.errors.len != 0) {
