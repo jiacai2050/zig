@@ -443,7 +443,10 @@ fn renderExpression(r: *Render, node: Ast.Node.Index, space: Space) Error!void {
             if (r.fixups.insert_parentheses.contains(node)) {
                 try renderExpression(r, rhs, .none);
                 try ais.writeByte(')');
-                try renderOnlySpace(r, space);
+                const right_most_token = tree.lastToken(rhs);
+                const lexeme = tokenSliceForRender(tree, right_most_token);
+                // If our space is .none, then the above code functions is normal and below shouldn't run
+                if (space != .none) try renderSpace(r, right_most_token, lexeme.len, space);
             } else {
                 try renderExpression(r, rhs, space); // fallback
             }
