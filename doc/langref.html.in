@@ -1907,6 +1907,34 @@ and
 or
 = *= *%= *|= /= %= += +%= +|= -= -%= -|= <<= <<|= >>= &= ^= |={#endsyntax#}</pre>
       {#header_close#}
+      <p>
+      However, understanding the full ambiguity rules are not necessary for reading or writing code. Instead, having an understanding of the unambiguous cases for the operators, you're using is more practical. To that end, some simplified versions, of the precedence table are provided below, tailored to understanding particular groups of operator groups. The operators that have ambiguous precedence with the given operators in question have been omitted, as have operators with higher precedence. The operators colored <span style="color: orange">orange</span> have ambiguous precedence with other operators on the same line.
+
+      For arithmetic and error set operators, the simplfied precedence table would look like this.
+      </p>
+
+      <pre><code>* / *% *| || <span style="color: orange">%</span>
++ - ++ +% -% +| -|
+== != &lt; > &lt;= >=
+<span style="color: orange">and or</span>
+= *= *%= *|= /= %= += +%= +|= -= -%= -|= &lt;&lt;= &lt;&lt;|= >>= &= ^= |=</code></pre>
+
+      <p>
+      For bitwise operators, it would look like this:
+      </p>
+
+      <pre><code><span style="color: orange">&lt;&lt; &lt;&lt;| >> & ^ |</span>
+== != &lt; > &lt;= >=
+<span style="color: orange">and or</span>
+= *= *%= *|= /= %= += +%= +|= -= -%= -|= &lt;&lt;= &lt;&lt;|= >>= &= ^= |=</code></pre>
+
+      <p>
+      For null and error recovery, it would look like this:
+      </p>
+
+      <pre><code><span style="color: orange">catch orelse</span>
+= *= *%= *|= /= %= += +%= +|= -= -%= -|= &lt;&lt;= &lt;&lt;|= >>= &= ^= |=</code></pre>
+
       {#header_close#}
       {#header_close#}
 
