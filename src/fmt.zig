@@ -387,8 +387,87 @@ fn fmtPathFile(
         break :mode .zig;
     };
 
-    var tree = try std.zig.Ast.parse(gpa, source_code, .{ .mode = mode, .use_old_precedence = fmt.fix_precedence });
+    var tree = try std.zig.Ast.parse(gpa, source_code, .{ .mode = mode });
     defer tree.deinit(gpa);
+
+    var fixups: std.zig.Ast.Render.Fixups = .{};
+    defer fixups.deinit(gpa);
+
+    fix: {
+        if (!fmt.fix_precedence) break :fix;
+
+        var operators_to_fix: std.AutoHashMapUnmanaged(std.zig.Ast.TokenIndex, void) = .empty;
+        defer operators_to_fix.deinit(gpa);
+
+        // Gather ambiguous operator precedence error tokens for quick lookup later
+        for (tree.errors) |err| {
+            switch (err.tag) {
+                .hint_operator_precedence_left => {
+                    try operators_to_fix.putNoClobber(gpa, err.token - @as(u32, @intCast(err.extra.offset)), {});
+                },
+                .hint_operator_precedence_right => {
+                    try operators_to_fix.putNoClobber(gpa, err.token, {});
+                },
+                else => continue,
+            }
+        }
+
+        if (operators_to_fix.count() == 0) break :fix;
+
+        // Build a new error list without the ambiguous operator precedence errors/notes
+        var fixed_errors: std.ArrayList(std.zig.Ast.Error) = try .initCapacity(gpa, tree.errors.len - (operators_to_fix.count() * 3));
+        for (tree.errors) |err| {
+            switch (err.tag) {
+                .ambiguous_operator_precedence,
+                .illegal_chained_operators,
+                .previous_ambiguous_operator,
+                .hint_operator_precedence_left,
+                .hint_operator_precedence_right,
+                => continue,
+                else => {
+                    fixed_errors.appendAssumeCapacity(err);
+                },
+            }
+        }
+        gpa.free(tree.errors);
+        tree.errors = fixed_errors.toOwnedSliceAssert();
+
+        // Find the nodes we need to add parens to and add them to the list
+        for (tree.nodes.items(.tag), 0..) |tag, i| {
+            switch (tag) {
+                .merge_error_sets,
+                .mul,
+                .div,
+                .mod,
+                .mul_wrap,
+                .mul_sat,
+                .add,
+                .sub,
+                .array_cat,
+                .add_wrap,
+                .sub_wrap,
+                .add_sat,
+                .sub_sat,
+                .shl,
+                .shl_sat,
+                .shr,
+                .bit_and,
+                .bit_xor,
+                .bit_or,
+                .@"orelse",
+                .@"catch",
+                .bool_and,
+                .bool_or,
+                => {
+                    const main_tok = tree.nodes.get(i).main_token;
+                    if (operators_to_fix.contains(main_tok)) {
+                        try fixups.insert_parentheses.put(gpa, @fromBackingInt(@intCast(i)), {});
+                    }
+                },
+                else => {},
+            }
+        }
+    }
 
     if (tree.errors.len != 0) {
         try std.zig.printAstErrorsToStderr(gpa, io, tree, file_path, fmt.color);
@@ -497,7 +576,7 @@ fn fmtPathFile(
     fmt.out_buffer.clearRetainingCapacity();
     try fmt.out_buffer.ensureTotalCapacity(source_code.len);
 
-    tree.render(gpa, &fmt.out_buffer.writer, .{}) catch |err| switch (err) {
+    tree.render(gpa, &fmt.out_buffer.writer, fixups) catch |err| switch (err) {
         error.WriteFailed, error.OutOfMemory => return error.OutOfMemory,
     };
     if (!mem.eql(u8, fmt.out_buffer.written(), source_code)) {

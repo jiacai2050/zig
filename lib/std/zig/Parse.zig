@@ -24,7 +24,6 @@ nodes: Ast.NodeList,
 extra_data: std.ArrayList(u32),
 scratch: std.ArrayList(Node.Index),
 recover: bool,
-use_old_precedence: bool = false,
 
 fn tokenTag(p: *const Parse, token_index: TokenIndex) Token.Tag {
     return p.tokens.items(.tag)[token_index];
@@ -1793,8 +1792,7 @@ fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_token_const: u32
         const tok_tag = p.tokenTag(p.tok_i);
         const info = operTable[@backingInt(tok_tag)];
 
-        const prec_relation = if (!p.use_old_precedence) info.prec.cmp(min_exc_prec) else info.prec.v16_cmp(min_exc_prec);
-        const rel = prec_relation orelse b: {
+        const rel = info.prec.cmp(min_exc_prec) orelse b: {
             // This issues warnings if the relation is null, which it never is in 0.16.0
             const prev_op_tok_tag = p.tokenTag(prev_operator_token);
             const prev_op_info = operTable[@backingInt(prev_op_tok_tag)];
@@ -1831,7 +1829,8 @@ fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_token_const: u32
                     },
                 });
             }
-            break :b .gt;
+            // Use the old precedence rules to construct the tree to ease automatic fixups
+            break :b info.prec.v16_cmp(min_exc_prec);
         };
 
         if (rel == .lt) {
@@ -1842,8 +1841,7 @@ fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_token_const: u32
             //Special cased check to maintain the old more helpful error for chained comparisons.
             if (info.prec.group == .comparison) {
                 try p.warn(.chained_comparison_operators);
-                // In 0.16.0 the only reptition prohibited was comparisons which we checked above
-            } else if (!p.use_old_precedence) {
+            } else {
                 try p.warnMsg(.{
                     .tag = .illegal_chained_operators,
                     .is_note = false,
