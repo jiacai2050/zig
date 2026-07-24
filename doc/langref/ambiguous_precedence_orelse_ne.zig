@@ -15,4 +15,4 @@ test "ambiguous precedence" {
     _ = makeBool(x) orelse y != z;
 }
 
-// obj=ambiguous operator precedence with operators … orelse … != …; use parentheses to disambiguate
+// obj=ambiguous operator precedence with operators ... orelse ... != ...; use parentheses to disambiguate

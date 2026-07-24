@@ -556,7 +556,7 @@ pub fn renderError(tree: Ast, parse_error: Error, w: *Writer) Writer.Error!void 
             return w.writeAll("use 'var' or 'const' to declare variable");
         },
         .ambiguous_operator_precedence => {
-            return w.print("ambiguous operator precedence with operators … {s} … {s} …; use parentheses to disambiguate", .{
+            return w.print("ambiguous operator precedence with operators ... {s} ... {s} ...; use parentheses to disambiguate", .{
                 tree.tokenTag(parse_error.token - @as(u32, @intCast(parse_error.extra.offset))).lexeme().?,
                 tree.tokenTag(parse_error.token).lexeme().?,
             });
@@ -565,19 +565,19 @@ pub fn renderError(tree: Ast, parse_error: Error, w: *Writer) Writer.Error!void 
             return w.writeAll("previous ambiguous operator here");
         },
         .illegal_chained_operators => {
-            return w.print("repetition of non-chainable operators … {s} … {s} …; use parentheses to disambiguate", .{
+            return w.print("repetition of non-chainable operators ... {s} ... {s} ...; use parentheses to disambiguate", .{
                 tree.tokenTag(parse_error.token - @as(u32, @intCast(parse_error.extra.offset))).lexeme().?,
                 tree.tokenTag(parse_error.token).lexeme().?,
             });
         },
         .hint_operator_precedence_left => {
-            return w.print("did you mean `(… {s} …) {s} …` ?", .{
+            return w.print("previously evaluated as `(... {s} ...) {s} ...`", .{
                 tree.tokenTag(parse_error.token - @as(u32, @intCast(parse_error.extra.offset))).lexeme().?,
                 tree.tokenTag(parse_error.token).lexeme().?,
             });
         },
         .hint_operator_precedence_right => {
-            return w.print("did you mean `… {s} (… {s} …)` ?", .{
+            return w.print("previously evaluated as `... {s} (... {s} ...)`", .{
                 tree.tokenTag(parse_error.token - @as(u32, @intCast(parse_error.extra.offset))).lexeme().?,
                 tree.tokenTag(parse_error.token).lexeme().?,
             });

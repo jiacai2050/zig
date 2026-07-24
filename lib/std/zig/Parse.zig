@@ -1552,34 +1552,47 @@ const PrecClass = struct {
 
         root,
 
-        /// For this to work correctly we require that all subgroups are strictly adjacent
-        /// Major groups are defined by the first text before an underscore
-        const Major: type = b: {
-            var major_names: []const []const u8 = &.{};
-            for (std.meta.fieldNames(Group)) |fieldname| {
-                var major_name: []const u8 = fieldname[0..];
-                for (fieldname, 0..) |c, i| {
-                    if (c == '_') {
-                        major_name = fieldname[0..i];
-                        break;
-                    }
-                }
-                if (major_names.len == 0 or !std.mem.eql(u8, major_name, major_names[major_names.len - 1])) {
-                    major_names = major_names ++ &[1][]const u8{major_name};
-                }
-            }
-
-            const IntType = std.math.IntFittingRange(0, major_names.len - 1);
-            var values: [major_names.len]IntType = undefined;
-            for (0..major_names.len) |i| values[i] = i;
-
-            break :b @Enum(
-                IntType,
-                .exhaustive,
-                major_names,
-                &values,
-            );
+        const Major = enum {
+            top,
+            arithmetic,
+            bitwise,
+            comparison,
+            bool,
+            recovery,
+            root,
         };
+
+        fn getMajor(group: Group) Major {
+            return switch (group) {
+                .top,
+                => .top,
+
+                .arithmetic_product_chainable,
+                .arithmetic_mod_nonchainable,
+                .arithmetic_sum,
+                => .arithmetic,
+
+                .bitwise_shift,
+                .bitwise_and,
+                .bitwise_xor,
+                .bitwise_or,
+                => .bitwise,
+
+                .comparison,
+                => .comparison,
+
+                .bool_and,
+                .bool_or,
+                => .bool,
+
+                .recovery_orelse,
+                .recovery_catch,
+                => .recovery,
+
+                .root,
+                => .root,
+            };
+        }
     };
 
     pub const start: PrecClass = .{ .group = .root };
@@ -1598,29 +1611,22 @@ const PrecClass = struct {
 
     fn setMajorRelation(prec_array: *PrecedenceArray, major_a: Group.Major, rel: Rel, major_b: Group.Major) void {
         for (std.meta.fieldNames(Group), 0..) |fieldname_i, i| {
-            if (!std.mem.startsWith(u8, fieldname_i, @tagName(major_a))) continue;
+            if (@field(Group, fieldname_i).getMajor() != major_a) continue;
 
             for (std.meta.fieldNames(Group), 0..) |fieldname_j, j| {
-                if (!std.mem.startsWith(u8, fieldname_j, @tagName(major_b))) continue;
+                if (@field(Group, fieldname_j).getMajor() != major_b) continue;
 
-                prec_array.*[i][j] = rel;
-                prec_array.*[j][i] = rel.inverted();
+                prec_array[i][j] = rel;
+                prec_array[j][i] = rel.inverted();
             }
         }
     }
 
     fn setMinorRelation(prec_array: *PrecedenceArray, minor_a: Group, rel: Rel, minor_b: Group) void {
-        prec_array.*[@backingInt(minor_a)][@backingInt(minor_b)] = rel;
-        prec_array.*[@backingInt(minor_b)][@backingInt(minor_a)] = rel.inverted();
+        prec_array[@backingInt(minor_a)][@backingInt(minor_b)] = rel;
+        prec_array[@backingInt(minor_b)][@backingInt(minor_a)] = rel.inverted();
     }
 
-    /// Arithmetic_* > Comparison
-    /// Bitwise_*    > Comparison
-    /// Comparison   > Bool_*     > Root
-    /// Recovery     > Root
-    ///
-    /// *_Product    > *_Sum
-    ///
     /// order[y][x] --> y cmp x
     const precedence_ordering = b: {
         @setEvalBranchQuota(20_000);
@@ -1646,7 +1652,7 @@ const PrecClass = struct {
         setMinorRelation(&order, .arithmetic_mod_nonchainable, .gt, .arithmetic_sum);
         setMinorRelation(&order, .arithmetic_product_chainable, .gt, .arithmetic_sum);
 
-        computeTransativeOrdering(&order);
+        computeTransitiveOrdering(&order);
         break :b order;
     };
 
@@ -1658,7 +1664,7 @@ const PrecClass = struct {
     ///   == != < > <= >=
     ///   and
     ///   or
-    const v16_precedence_ordering = b: {
+    const v0_16_precedence_ordering = b: {
         @setEvalBranchQuota(20_000);
 
         var order: PrecedenceArray = @splat(@splat(null));
@@ -1685,7 +1691,7 @@ const PrecClass = struct {
 
         setMinorRelation(&order, .bool_or, .gt, .root);
 
-        computeTransativeOrdering(&order);
+        computeTransitiveOrdering(&order);
         for (order) |row| {
             for (row) |item| {
                 if (item == null) @compileError("Null entry in old precedence ordering which had none.");
@@ -1698,11 +1704,11 @@ const PrecClass = struct {
         return PrecClass.precedence_ordering[@backingInt(lhs.group)][@backingInt(rhs.group)];
     }
 
-    pub fn v16_cmp(lhs: PrecClass, rhs: PrecClass) Rel {
-        return PrecClass.v16_precedence_ordering[@backingInt(lhs.group)][@backingInt(rhs.group)].?;
+    pub fn v0_16_cmp(lhs: PrecClass, rhs: PrecClass) Rel {
+        return PrecClass.v0_16_precedence_ordering[@backingInt(lhs.group)][@backingInt(rhs.group)].?;
     }
 
-    fn computeTransativeOrdering(order: *PrecedenceArray) void {
+    fn computeTransitiveOrdering(order: *PrecedenceArray) void {
         for (0..Group.num_distinct) |i| for (0..Group.num_distinct) |j| for (0..Group.num_distinct) |k| {
             if (order[i][j] == null or order[j][k] == null) continue;
             // X < Y < Z ==> X < Z         X > Y > Z ==> X > Z
@@ -1766,23 +1772,6 @@ const operTable = std.enums.directEnumArrayDefault(Token.Tag, OperInfo, .{ .prec
     // zig fmt: on
 });
 
-fn comptimePrecedenceFromNodeTag(comptime tag: Node.Tag) PrecClass {
-    for (operTable) |data| {
-        if (data.tag == tag) return data.prec;
-    }
-    return .{ .group = .top, .assoc = .left };
-}
-
-pub fn precedenceFromNodeTag(tag: Node.Tag) PrecClass {
-    return switch (tag) {
-        inline else => |ct_tag| comptimePrecedenceFromNodeTag(ct_tag),
-    };
-}
-
-pub fn newPrecedenceBetween(left_tok: Node.Tag, right_tok: Node.Tag) ?PrecClass.Rel {
-    return precedenceFromNodeTag(left_tok).cmp(precedenceFromNodeTag(right_tok));
-}
-
 fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_token_const: u32) Error!?Node.Index {
     var node = try p.parsePrefixExpr() orelse return null;
 
@@ -1793,10 +1782,9 @@ fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_token_const: u32
         const info = operTable[@backingInt(tok_tag)];
 
         const rel = info.prec.cmp(min_exc_prec) orelse b: {
-            // This issues warnings if the relation is null, which it never is in 0.16.0
             const prev_op_tok_tag = p.tokenTag(prev_operator_token);
             const prev_op_info = operTable[@backingInt(prev_op_tok_tag)];
-            const v16_rel = prev_op_info.prec.v16_cmp(info.prec);
+            const v0_16_rel = prev_op_info.prec.v0_16_cmp(info.prec);
             try p.warnMsg(.{
                 .tag = .ambiguous_operator_precedence,
                 .is_note = false,
@@ -1810,7 +1798,7 @@ fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_token_const: u32
                 .is_note = true,
                 .token = prev_operator_token,
             });
-            if (v16_rel == .gt or v16_rel == .eq) {
+            if (v0_16_rel == .gt or v0_16_rel == .eq) {
                 try p.warnMsg(.{
                     .tag = .hint_operator_precedence_left,
                     .is_note = true,
@@ -1830,7 +1818,7 @@ fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_token_const: u32
                 });
             }
             // Use the old precedence rules to construct the tree to ease automatic fixups
-            break :b info.prec.v16_cmp(min_exc_prec);
+            break :b info.prec.v0_16_cmp(min_exc_prec);
         };
 
         if (rel == .lt) {
@@ -1838,7 +1826,6 @@ fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_token_const: u32
         }
 
         if (min_exc_prec.group == info.prec.group and min_exc_prec.assoc == .none and info.prec.assoc == .none) {
-            //Special cased check to maintain the old more helpful error for chained comparisons.
             if (info.prec.group == .comparison) {
                 try p.warn(.chained_comparison_operators);
             } else {

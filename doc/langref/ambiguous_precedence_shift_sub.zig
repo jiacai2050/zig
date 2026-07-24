@@ -7,4 +7,4 @@ test "ambiguous precedence" {
     _ = x << y - 1;
 }
 
-// obj=ambiguous operator precedence with operators … << … - …; use parentheses to disambiguate
+// obj=ambiguous operator precedence with operators ... << ... - ...; use parentheses to disambiguate

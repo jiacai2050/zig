@@ -8,4 +8,4 @@ test "ambiguous precedence" {
     _ =  x & y *% z;
 }
 
-// obj=ambiguous operator precedence with operators … & … *% …; use parentheses to disambiguate
+// obj=ambiguous operator precedence with operators ... & ... *% ...; use parentheses to disambiguate
