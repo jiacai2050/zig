@@ -400,14 +400,21 @@ fn fmtPathFile(
         defer operators_to_fix.deinit(gpa);
 
         // Gather ambiguous operator precedence error tokens for quick lookup later
+        var remaining_errors: usize = tree.errors.len;
         for (tree.errors) |err| {
             switch (err.tag) {
                 .hint_operator_precedence_left => {
-                    try operators_to_fix.putNoClobber(gpa, err.token - @as(u32, @intCast(err.extra.offset)), {});
+                    try operators_to_fix.put(gpa, err.token - @as(u32, @intCast(err.extra.offset)), {});
+                    remaining_errors -= 1;
                 },
                 .hint_operator_precedence_right => {
-                    try operators_to_fix.putNoClobber(gpa, err.token, {});
+                    try operators_to_fix.put(gpa, err.token, {});
+                    remaining_errors -= 1;
                 },
+                .ambiguous_operator_precedence,
+                .illegal_chained_operators,
+                .previous_ambiguous_operator,
+                => remaining_errors -= 1,
                 else => continue,
             }
         }
@@ -415,7 +422,7 @@ fn fmtPathFile(
         if (operators_to_fix.count() == 0) break :fix;
 
         // Build a new error list without the ambiguous operator precedence errors/notes
-        var fixed_errors: std.ArrayList(std.zig.Ast.Error) = try .initCapacity(gpa, tree.errors.len - (operators_to_fix.count() * 3));
+        var fixed_errors: std.ArrayList(std.zig.Ast.Error) = try .initCapacity(gpa, remaining_errors);
         for (tree.errors) |err| {
             switch (err.tag) {
                 .ambiguous_operator_precedence,
