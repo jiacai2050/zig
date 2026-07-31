@@ -1772,10 +1772,8 @@ const operTable = std.enums.directEnumArrayDefault(Token.Tag, OperInfo, .{ .prec
     // zig fmt: on
 });
 
-fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_token_const: u32) Error!?Node.Index {
+fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_operator_token: u32) Error!?Node.Index {
     var node = try p.parsePrefixExpr() orelse return null;
-
-    var prev_operator_token = prev_token_const;
 
     while (true) {
         const tok_tag = p.tokenTag(p.tok_i);
@@ -1884,8 +1882,7 @@ fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_token_const: u32
             }
         }
 
-        prev_operator_token = oper_token;
-        const rhs = try p.parseExprPrecedence(info.prec, prev_operator_token) orelse {
+        const rhs = try p.parseExprPrecedence(info.prec, oper_token) orelse {
             try p.warn(.expected_expr);
             return node;
         };
