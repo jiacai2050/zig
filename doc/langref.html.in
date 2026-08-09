@@ -1907,35 +1907,7 @@ and
 or
 = *= *%= *|= /= %= += +%= +|= -= -%= -|= <<= <<|= >>= &= ^= |={#endsyntax#}</pre>
       {#header_close#}
-      <p>
-      However, understanding the full ambiguity rules are not necessary for reading or writing code. Instead, having an understanding of the unambiguous cases for the operators, you're using is more practical. To that end, some simplified versions, of the precedence table are provided below, tailored to understanding particular groups of operator groups. The operators that have ambiguous precedence with the given operators in question have been omitted, as have operators with higher precedence. The operators colored <span style="color: orange">orange</span> have ambiguous precedence with other operators on the same line.
 
-      For arithmetic and error set operators, the simplfied precedence table would look like this.
-      </p>
-
-      <pre><code>* / *% *| || <span style="color: orange">%</span>
-+ - ++ +% -% +| -|
-== != &lt; > &lt;= >=
-<span style="color: orange">and or</span>
-= *= *%= *|= /= %= += +%= +|= -= -%= -|= &lt;&lt;= &lt;&lt;|= >>= &= ^= |=</code></pre>
-
-      <p>
-      For bitwise operators, it would look like this:
-      </p>
-
-      <pre><code><span style="color: orange">&lt;&lt; &lt;&lt;| >> & ^ |</span>
-== != &lt; > &lt;= >=
-<span style="color: orange">and or</span>
-= *= *%= *|= /= %= += +%= +|= -= -%= -|= &lt;&lt;= &lt;&lt;|= >>= &= ^= |=</code></pre>
-
-      <p>
-      For null and error recovery, it would look like this:
-      </p>
-
-      <pre><code><span style="color: orange">catch orelse</span>
-= *= *%= *|= /= %= += +%= +|= -= -%= -|= &lt;&lt;= &lt;&lt;|= >>= &= ^= |=</code></pre>
-
-      {#header_close#}
       {#header_close#}
 
       {#header_open|Arrays#}
@@ -7909,6 +7881,42 @@ fn readU32Be() u32 {}
       {#header_open|Appendix#}
       {#header_open|Grammar#}
       {#grammar#}
+      {#header_open|Operator Precedence Flowchart#}
+      <p>
+      To help understand the grammar, this flowchart is provided for the operator precedence. 
+      The bottom represents any location where an expression may occur and the topmost row represents
+      a parenthesized expression. An operator will have a higher precedence (and therefore be the parent) to 
+      another node if it is strictly lower on the tree (having a directed path from one to another). This is inverted from classical precedence, but 
+      is closer to how a recursive descent parser views the grammar. 
+      </p>
+      <pre><code>
+                     ┏━━━━━━━━━━━━━━━━━━━┓   
+                     ┃(expr)             ┃                  
+                     ┃x() x[] x.y x.* x.?┃                  
+                     ┃E!T                ┃                  
+                     ┃x{}                ┃                  
+                     ┃!x -x -%x ~x &x ?x ┃                  
+                     ┗━━━━━━━━━▲━━━━━━━━━┛                  
+          ┌─────────────┬──────┴───────┬───────┬──┬──┬─┐         
+          │             │              │       │  │  │ │         
+   ┏━━━━━━┷━━━━━┓╭Non╌Chaining╮ ╭Non╌Chaining╮┏┷┓┏┷┓┏┷┓│         
+   ┃* *% *| / ||┃╎      %     ╎ ╎ &lt;&lt; &lt;&lt;|  >> ╎┃&┃┃^┃┃|┃│         
+   ┗━━━━━━▲━━━━━┛╰╌╌╌╌╌╌▲╌╌╌╌╌╯ ╰╌╌╌╌╌╌▲╌╌╌╌╌╯┗▲┛┗▲┛┗▲┛│         
+       ┏━━┷━━━━━━━━━━━━━┷━┓       ┌────┴───────┴──┴──┘ │         
+       ┃+ - +% -% +| -| ++┃       │                    │         
+       ┗━━━━━━━━━━━▲━━━━━━┛       │                    │         
+                  ╭┴╌Non-Chaining╌┴╮                   │         
+                  ╎== !=  &lt; &lt;= >= >╎                   │         
+                  ╰╌╌╌▲╌╌╌╌▲╌╌╌╌╌╌╌╯      ┌──────┬─────┘                
+                    ┏━┷━┓┏━┷━┓        ┏━━━┷━━┓┏━━┷━━┓                  
+                    ┃and┃┃or ┃        ┃orelse┃┃catch┃                  
+                    ┗━▲━┛┗━▲━┛        ┗━━━▲━━┛┗━━▲━━┛                  
+                   ╭╌╌┴╌╌╌╌┴╌╌╌╌╌╌╌╌╌╌╌╌╌╌┴╌╌╌╌╌╌┴╌╮ 
+                   ╎    Any expression location    ╎ 
+                   ╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯ 
+                                                              
+      </code></pre>
+      {#header_close#}
       {#header_close#}
       {#header_open|Zen#}
       <ul>
