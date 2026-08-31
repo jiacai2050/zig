@@ -492,7 +492,7 @@ const Archive = struct {
 
 const Section = struct {
     /// The node corresponding to this section.
-    ni: MappedFile.Node.Index,
+    ni: MappedFile.Node.Index.Optional,
     /// A symbol which is exactly at the start of this section.
     ///
     /// When not emitting a relocatable, or for special section types, this is `.null`.
@@ -596,6 +596,13 @@ const Section = struct {
             return &elf.shdrs.items[@backingInt(shndx) - 1]; // overflow means you tried to get the `.UNDEF` section
         }
 
+        /// Convenience function for accessing a section's `MappedFile` node.
+        ///
+        /// Asserts that the section's `ni` is not `.none` (so, the section type is not `SHT_NOBITS`).
+        fn node(shndx: Index, elf: *Elf) MappedFile.Node.Index {
+            return shndx.get(elf).ni.unwrap().?;
+        }
+
         fn name(shndx: Index, elf: *Elf) String(.shstrtab) {
             return switch (elf.shdrPtr(shndx)) {
                 inline else => |shdr| @fromBackingInt(elf.targetLoad(&shdr.name)),
@@ -648,7 +655,7 @@ const Section = struct {
                     elf.targetStore(&shdr.addralign, @intCast(min_align.toByteUnits()));
                 },
             }
-            const ni = shndx.get(elf).ni;
+            const ni = shndx.node(elf);
             if (min_align.compare(.gt, ni.alignment(&elf.mf))) {
                 try ni.realign(elf.base.comp.gpa, &elf.mf, min_align);
             }
@@ -662,7 +669,7 @@ const Section = struct {
         /// Asserts that `rela_shndx` is a `SHT_RELA` section and ensures that its node has enough
         /// unused space to hold `n` additional `ElfN.Rela` entries.
         fn relaEnsureAdditionalCapacity(rela_shndx: Index, elf: *Elf, n: usize) Error!void {
-            const node = rela_shndx.get(elf).ni;
+            const ni = rela_shndx.node(elf);
             const need_size: u64 = switch (elf.shdrPtr(rela_shndx)) {
                 inline else => |shdr, class| need_size: {
                     assert(elf.targetLoad(&shdr.type) == .RELA);
@@ -673,7 +680,7 @@ const Section = struct {
                         const opt_free_head = rela_shndx.get(elf).rela.free_head;
                         const free_head = opt_free_head.unwrap() orelse break :free_len 0;
                         const relas: []const class.ElfN().Rela = @ptrCast(@alignCast(
-                            node.slice(&elf.mf)[0..@intCast(cur_size)],
+                            ni.slice(&elf.mf)[0..@intCast(cur_size)],
                         ));
                         const free_len = elf.targetLoad(&relas[@backingInt(free_head)].addend);
                         assert(free_len > 0);
@@ -683,7 +690,7 @@ const Section = struct {
                     break :need_size cur_size + need_additional * ent_size;
                 },
             };
-            try node.ensureMinimumSize(elf.base.comp.gpa, &elf.mf, need_size);
+            try ni.ensureMinimumSize(elf.base.comp.gpa, &elf.mf, need_size);
         }
 
         /// Asserts that `rela_shndx` is a `SHT_RELA` section and deletes the `ElfN.Rela` entry at
@@ -695,7 +702,7 @@ const Section = struct {
                     assert(elf.targetLoad(&shdr.type) == .RELA);
                     assert(elf.targetLoad(&shdr.entsize) == @sizeOf(class.ElfN().Rela));
                     const relas: []class.ElfN().Rela = @ptrCast(@alignCast(
-                        rela_shndx.get(elf).ni.slice(&elf.mf)[0..@intCast(elf.targetLoad(&shdr.size))],
+                        rela_shndx.node(elf).slice(&elf.mf)[0..@intCast(elf.targetLoad(&shdr.size))],
                     ));
                     const opt_free_head = rela_shndx.get(elf).rela.free_head;
                     const old_free_len: u32 = free_len: {
@@ -743,7 +750,7 @@ const Section = struct {
                     assert(elf.targetLoad(&shdr.entsize) == ent_size);
                     const new_index: RelaIndex = if (rela_shndx.get(elf).rela.free_head.unwrap()) |free_head| new_index: {
                         const relas: []class.ElfN().Rela = @ptrCast(@alignCast(
-                            rela_shndx.get(elf).ni.slice(&elf.mf)[0..@intCast(elf.targetLoad(&shdr.size))],
+                            rela_shndx.node(elf).slice(&elf.mf)[0..@intCast(elf.targetLoad(&shdr.size))],
                         ));
                         const next: RelaIndex.Optional = @fromBackingInt(@intCast(elf.targetLoad(
                             &relas[@backingInt(free_head)].offset,
@@ -766,7 +773,7 @@ const Section = struct {
                         break :new_index @fromBackingInt(@intCast(@divExact(old_size, ent_size)));
                     };
                     const relas: []class.ElfN().Rela = @ptrCast(@alignCast(
-                        rela_shndx.get(elf).ni.slice(&elf.mf)[0..@intCast(elf.targetLoad(&shdr.size))],
+                        rela_shndx.node(elf).slice(&elf.mf)[0..@intCast(elf.targetLoad(&shdr.size))],
                     ));
                     relas[@backingInt(new_index)] = .{
                         .offset = @intCast(opts.offset),
@@ -794,7 +801,7 @@ const Section = struct {
                     assert(elf.targetLoad(&shdr.type) == .RELA);
                     assert(elf.targetLoad(&shdr.entsize) == @sizeOf(class.ElfN().Rela));
                     const relas: []class.ElfN().Rela = @ptrCast(@alignCast(
-                        rela_shndx.get(elf).ni.slice(&elf.mf)[0..@intCast(elf.targetLoad(&shdr.size))],
+                        rela_shndx.node(elf).slice(&elf.mf)[0..@intCast(elf.targetLoad(&shdr.size))],
                     ));
                     const rela_info = elf.targetLoad(&relas[@backingInt(index)].info);
                     {
@@ -818,7 +825,7 @@ const Section = struct {
                     assert(elf.targetLoad(&shdr.type) == .RELA);
                     assert(elf.targetLoad(&shdr.entsize) == @sizeOf(class.ElfN().Rela));
                     const relas: []class.ElfN().Rela = @ptrCast(@alignCast(
-                        rela_shndx.get(elf).ni.slice(&elf.mf)[0..@intCast(elf.targetLoad(&shdr.size))],
+                        rela_shndx.node(elf).slice(&elf.mf)[0..@intCast(elf.targetLoad(&shdr.size))],
                     ));
                     {
                         const rela_info = elf.targetLoad(&relas[@backingInt(index)].info);
@@ -839,7 +846,7 @@ const Section = struct {
                     assert(elf.targetLoad(&shdr.type) == .RELA);
                     assert(elf.targetLoad(&shdr.entsize) == @sizeOf(class.ElfN().Rela));
                     const relas: []class.ElfN().Rela = @ptrCast(@alignCast(
-                        rela_shndx.get(elf).ni.slice(&elf.mf)[0..@intCast(elf.targetLoad(&shdr.size))],
+                        rela_shndx.node(elf).slice(&elf.mf)[0..@intCast(elf.targetLoad(&shdr.size))],
                     ));
                     {
                         const rela_info = elf.targetLoad(&relas[@backingInt(index)].info);
@@ -863,7 +870,7 @@ const Section = struct {
                     assert(elf.targetLoad(&shdr.type) == .RELA);
                     assert(elf.targetLoad(&shdr.entsize) == @sizeOf(class.ElfN().Rela));
                     const relas: []class.ElfN().Rela = @ptrCast(@alignCast(
-                        rela_shndx.get(elf).ni.slice(&elf.mf)[0..@intCast(elf.targetLoad(&shdr.size))],
+                        rela_shndx.node(elf).slice(&elf.mf)[0..@intCast(elf.targetLoad(&shdr.size))],
                     ));
                     {
                         const rela_info = elf.targetLoad(&relas[@backingInt(index)].info);
@@ -2220,7 +2227,7 @@ const GotReloc = struct {
     fn apply(reloc: *GotReloc, elf: *Elf) void {
         assert(elf.ehdrType() != .REL);
         const node = reloc.node.unwrap() orelse return; // deleted
-        if (node.hasMoved(&elf.mf) or elf.shndx.got.get(elf).ni.hasMoved(&elf.mf)) {
+        if (node.hasMoved(&elf.mf) or elf.shndx.got.node(elf).hasMoved(&elf.mf)) {
             // There's no point applying the relocation now, because it will be re-applied by
             // `flushMoved` at some point anyway.
             return;
@@ -2452,7 +2459,7 @@ fn ensureDynsymHashCapacity(elf: *Elf, max_dynsym_count: u32) Error!void {
     switch (elf.targetDynsymHashInfo()) {
         inline else => |info| {
             {
-                const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+                const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.node(elf).slice(&elf.mf));
                 const header: *info.Header() = @ptrCast(section_slice[0..@sizeOf(info.Header())]);
                 assert(elf.targetLoad(&header.nchain) == cur_dynsym_count);
                 const nbucket = elf.targetLoad(&header.nbucket);
@@ -2460,7 +2467,7 @@ fn ensureDynsymHashCapacity(elf: *Elf, max_dynsym_count: u32) Error!void {
                     // We don't need to add any buckets, but we still need to make sure the section is large
                     // enough to fit `max_dynsym_count` chains.
                     const need_size = @sizeOf(info.Header()) + (nbucket + max_dynsym_count) * 4;
-                    try elf.shndx.hash.get(elf).ni.ensureMinimumSize(gpa, &elf.mf, need_size);
+                    try elf.shndx.hash.node(elf).ensureMinimumSize(gpa, &elf.mf, need_size);
                     return;
                 }
                 // We need more buckets, so we'll have to rebuild the hash table.
@@ -2472,13 +2479,13 @@ fn ensureDynsymHashCapacity(elf: *Elf, max_dynsym_count: u32) Error!void {
 
             {
                 const need_size = @sizeOf(info.Header()) + (new_nbucket + max_dynsym_count) * 4;
-                try elf.shndx.hash.get(elf).ni.ensureMinimumSize(gpa, &elf.mf, need_size);
+                try elf.shndx.hash.node(elf).ensureMinimumSize(gpa, &elf.mf, need_size);
             }
 
             elf.mf.nodes_lock.lock();
             defer elf.mf.nodes_lock.unlock();
 
-            const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+            const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.node(elf).slice(&elf.mf));
             const header: *info.Header() = @ptrCast(section_slice[0..@sizeOf(info.Header())]);
             const trailing: []info.Int() = @ptrCast(section_slice[@sizeOf(info.Header())..]);
 
@@ -2508,7 +2515,7 @@ fn ensureDynsymHashCapacity(elf: *Elf, max_dynsym_count: u32) Error!void {
 fn appendDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
     switch (elf.targetDynsymHashInfo()) {
         inline else => |info| {
-            const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+            const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.node(elf).slice(&elf.mf));
             const header: *info.Header() = @ptrCast(section_slice[0..@sizeOf(info.Header())]);
             assert(elf.targetLoad(&header.nchain) == dynsym_index);
             elf.targetStore(&header.nchain, dynsym_index + 1);
@@ -2529,7 +2536,7 @@ fn populateDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
 
     switch (elf.targetDynsymHashInfo()) {
         inline else => |info| {
-            const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+            const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.node(elf).slice(&elf.mf));
             const header: *info.Header() = @ptrCast(section_slice[0..@sizeOf(info.Header())]);
             const trailing: []info.Int() = @ptrCast(section_slice[@sizeOf(info.Header())..]);
 
@@ -2551,7 +2558,7 @@ fn popDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
 
     switch (elf.targetDynsymHashInfo()) {
         inline else => |info| {
-            const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+            const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.node(elf).slice(&elf.mf));
             const header: *info.Header() = @ptrCast(section_slice[0..@sizeOf(info.Header())]);
             assert(elf.targetLoad(&header.nchain) == dynsym_index + 1);
             elf.targetStore(&header.nchain, dynsym_index);
@@ -2570,7 +2577,7 @@ fn clearDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
 
     switch (elf.targetDynsymHashInfo()) {
         inline else => |info| {
-            const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+            const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.node(elf).slice(&elf.mf));
             const header: *info.Header() = @ptrCast(section_slice[0..@sizeOf(info.Header())]);
             const trailing: []info.Int() = @ptrCast(section_slice[@sizeOf(info.Header())..]);
 
@@ -2615,7 +2622,7 @@ fn pltEntryIsDead(elf: *Elf, plt_index: usize) bool {
         inline else => |rela_shdr, class| {
             const size = elf.targetLoad(&rela_shdr.size);
             const relas: []class.ElfN().Rela = @ptrCast(@alignCast(
-                elf.shndx.rela_plt.get(elf).ni.slice(&elf.mf)[0..@intCast(size)],
+                elf.shndx.rela_plt.node(elf).slice(&elf.mf)[0..@intCast(size)],
             ));
             const rel_type = elf.targetLoad(&relas[plt_index].info).type;
             return rel_type == MachineRelocType.none(elf).unwrap(elf);
@@ -2636,7 +2643,7 @@ fn addLocalSymbol(elf: *Elf, opts: AddLocalSymbolOptions) Error!Symbol.LocalInde
 
     try elf.symtab.ensureUnusedCapacity(gpa, 1);
     try elf.changed_symtab_index.ensureUnusedCapacity(gpa, 1);
-    try Section.Index.symtab.get(elf).ni.ensureMinimumSize(gpa, &elf.mf, switch (elf.shdrPtr(.symtab)) {
+    try Section.Index.symtab.node(elf).ensureMinimumSize(gpa, &elf.mf, switch (elf.shdrPtr(.symtab)) {
         inline else => |shdr, class| elf.targetLoad(&shdr.size) + @sizeOf(class.ElfN().Sym),
     });
 
@@ -2715,7 +2722,7 @@ fn addGlobalSymbol(elf: *Elf, opts: Symbol.Global.AddOptions) (error{
     try elf.globals_by_name.ensureUnusedCapacity(gpa, 1);
     try elf.node_global_symbols.ensureUnusedCapacity(gpa, 1);
 
-    try Section.Index.symtab.get(elf).ni.ensureMinimumSize(gpa, &elf.mf, switch (elf.shdrPtr(.symtab)) {
+    try Section.Index.symtab.node(elf).ensureMinimumSize(gpa, &elf.mf, switch (elf.shdrPtr(.symtab)) {
         inline else => |shdr, class| elf.targetLoad(&shdr.size) + @sizeOf(class.ElfN().Sym),
     });
 
@@ -3059,8 +3066,8 @@ fn updateGlobalDynamic(elf: *Elf, orig_gsi: Symbol.Global.Index, force_apply_rel
         };
         const need_dynsym_len: u32 = @intCast(@divExact(dynsym_size, dynsym_ent_size) + 1);
 
-        try elf.shndx.dynsym.get(elf).ni.ensureMinimumSize(gpa, &elf.mf, need_dynsym_len * dynsym_ent_size);
-        try elf.shndx.gnu_version.get(elf).ni.ensureMinimumSize(gpa, &elf.mf, need_dynsym_len * 2);
+        try elf.shndx.dynsym.node(elf).ensureMinimumSize(gpa, &elf.mf, need_dynsym_len * dynsym_ent_size);
+        try elf.shndx.gnu_version.node(elf).ensureMinimumSize(gpa, &elf.mf, need_dynsym_len * 2);
         try elf.ensureDynsymHashCapacity(need_dynsym_len);
 
         const dynstr_name: String(.dynstr) = name: {
@@ -3246,7 +3253,7 @@ fn updateGlobalDynamic(elf: *Elf, orig_gsi: Symbol.Global.Index, force_apply_rel
             errdefer assert(elf.copied_globals.pop().?.key == gsi);
             try elf.nodes.ensureUnusedCapacity(gpa, 1);
             const node = elf.addNodeAssumeCapacity(
-                try shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
+                try shndx.node(elf).addFloatingChild(gpa, &elf.mf, .{
                     .size = dso_global.alignment.forward(dso_global.size),
                     .alignment = dso_global.alignment,
                 }),
@@ -4295,7 +4302,7 @@ fn lazySymbolInner(elf: *Elf, lazy: link.File.LazySymbol) Error!link.File.Symbol
             .const_data => .{ .rodata, .OBJECT },
         };
         const node = elf.addNodeAssumeCapacity(
-            try shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
+            try shndx.node(elf).addFloatingChild(gpa, &elf.mf, .{}),
             switch (lazy.kind) {
                 .code => .{ .lazy_code = @fromBackingInt(@intCast(gop.index)) },
                 .const_data => .{ .lazy_const_data = @fromBackingInt(@intCast(gop.index)) },
@@ -4472,7 +4479,7 @@ fn String(section: StringSection) type {
         _,
 
         fn slice(str: @This(), elf: *Elf) [:0]const u8 {
-            const section_node = section.shndx(elf).get(elf).ni;
+            const section_node = section.shndx(elf).node(elf);
             const overlong = section_node.sliceConst(&elf.mf)[@backingInt(str)..];
             return overlong[0..std.mem.findScalar(u8, overlong, 0).? :0];
         }
@@ -4532,14 +4539,14 @@ const StringTable = struct {
 
     fn getExisting(st: *StringTable, elf: *Elf, shndx: Section.Index, key: []const u8) u32 {
         if (key.len == 0) return 0;
-        const slice_const = shndx.get(elf).ni.sliceConst(&elf.mf);
+        const slice_const = shndx.node(elf).sliceConst(&elf.mf);
         const adapter: StringTable.Adapter = .{ .slice = slice_const };
         return st.map.getKeyAdapted(key, adapter).?;
     }
 
     fn ensureAdditionalCapacity(st: *StringTable, elf: *Elf, shndx: Section.Index, string_len: usize) Error!void {
         const gpa = elf.base.comp.gpa;
-        const ni = shndx.get(elf).ni;
+        const ni = shndx.node(elf);
         const slice_const = ni.sliceConst(&elf.mf);
         try st.map.ensureUnusedCapacityContext(gpa, 1, .{ .slice = slice_const });
         const size: u64 = switch (elf.shdrPtr(shndx)) {
@@ -4553,7 +4560,7 @@ const StringTable = struct {
         // case the empty string.
         if (key.len == 0) return 0;
 
-        const ni = shndx.get(elf).ni;
+        const ni = shndx.node(elf);
         const slice_const = ni.sliceConst(&elf.mf);
         const gop = st.map.getOrPutAssumeCapacityAdapted(
             key,
@@ -5476,7 +5483,7 @@ fn initHeaders(
         .node_align = node_block_align,
         .manual_size = true,
     }));
-    Section.Index.get(.shstrtab, elf).ni.slice(&elf.mf)[0] = 0;
+    Section.Index.shstrtab.node(elf).slice(&elf.mf)[0] = 0;
 
     try Section.Index.symtab.rename(elf, ".symtab");
     try Section.Index.shstrtab.rename(elf, ".shstrtab");
@@ -5489,7 +5496,7 @@ fn initHeaders(
         .node_align = node_block_align,
         .manual_size = true,
     }));
-    Section.Index.get(.strtab, elf).ni.slice(&elf.mf)[0] = 0;
+    Section.Index.strtab.node(elf).slice(&elf.mf)[0] = 0;
     switch (elf.shdrPtr(.symtab)) {
         inline else => |shdr| elf.targetStore(&shdr.link, @backingInt(Section.Index.strtab)),
     }
@@ -5595,7 +5602,7 @@ fn initHeaders(
                 .flags = .{ .ALLOC = true },
                 .size = @intCast(interp.len + 1),
             });
-            const sec_interp = sec_interp_shndx.get(elf).ni.slice(&elf.mf);
+            const sec_interp = sec_interp_shndx.node(elf).slice(&elf.mf);
             @memcpy(sec_interp[0..interp.len], interp);
             sec_interp[interp.len] = 0;
         }
@@ -5620,7 +5627,7 @@ fn initHeaders(
                 .node_align = node_block_align,
                 .manual_size = true,
             });
-            dynstr_shndx.get(elf).ni.slice(&elf.mf)[0] = 0;
+            dynstr_shndx.node(elf).slice(&elf.mf)[0] = 0;
             elf.shndx.dynstr = dynstr_shndx;
 
             switch (class) {
@@ -5765,7 +5772,7 @@ fn initHeaders(
                         .size = @sizeOf(info.Header()) + @sizeOf(info.Int()) * (8 + 1),
                         .manual_size = true,
                     });
-                    const hash_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+                    const hash_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.node(elf).slice(&elf.mf));
                     const header: *info.Header() = @ptrCast(hash_slice[0..@sizeOf(info.Header())]);
                     header.* = .{ .nbucket = 8, .nchain = 1 };
                     if (elf.targetEndian() != std.lang.Endian.native) {
@@ -5779,7 +5786,7 @@ fn initHeaders(
             switch (machine) {
                 .AARCH64, .PPC64, .RISCV => @panic(@tagName(machine)),
                 .X86_64 => {
-                    const plt_ni = elf.shndx.plt.get(elf).ni;
+                    const plt_ni = elf.shndx.plt.node(elf);
                     const got_plt_sym: Symbol.Id = .local(elf.shndx.got_plt.get(elf).lsi);
                     @memcpy(plt_ni.slice(&elf.mf)[0..16], &[16]u8{
                         0xff, 0x35, 0x00, 0x00, 0x00, 0x00, // push 0x0(%rip)
@@ -5804,7 +5811,7 @@ fn initHeaders(
                     );
                 },
                 .LOONGARCH => {
-                    const plt_ni = elf.shndx.plt.get(elf).ni;
+                    const plt_ni = elf.shndx.plt.node(elf);
                     const got_plt_sym: Symbol.Id = .local(elf.shndx.got_plt.get(elf).lsi);
                     @memcpy(plt_ni.slice(&elf.mf)[0..32], switch (class) {
                         .NONE, _ => unreachable,
@@ -5881,7 +5888,7 @@ fn initHeaders(
                 .manual_size = true,
             });
 
-            const eh_frame_hdr_ni = elf.shndx.eh_frame_hdr.get(elf).ni;
+            const eh_frame_hdr_ni = elf.shndx.eh_frame_hdr.node(elf);
             elf.eh_frame_hdr_first_symbol_reloc =
                 @fromBackingInt(@intCast(elf.symbol_relocs.items.len));
             try elf.dwarf.genEhFrameHdr(
@@ -5890,7 +5897,7 @@ fn initHeaders(
                 Symbol.Id.local(elf.shndx.eh_frame.get(elf).lsi).toTypeErased(),
             );
             _ = elf.addNodeAssumeCapacity(
-                try elf.shndx.eh_frame.get(elf).ni.addOnlyFooterChild(gpa, &elf.mf, .{
+                try elf.shndx.eh_frame.node(elf).addOnlyFooterChild(gpa, &elf.mf, .{
                     .size = addr_align.forward(4),
                     .alignment = addr_align,
                 }),
@@ -5937,7 +5944,7 @@ fn initHeaders(
 
         // Despite the name, `__dso_handle` is necessary even in static binaries.
         _ = elf.addGlobalSymbol(.{
-            .node = .wrap(Section.Index.text.get(elf).ni),
+            .node = .wrap(Section.Index.text.node(elf)),
             .name = "__dso_handle",
             .value = Section.Index.text.vaddr(elf),
             .size = 0,
@@ -5952,7 +5959,7 @@ fn initHeaders(
             else => |e| return e,
         };
         _ = elf.addGlobalSymbol(.{
-            .node = .wrap(elf.shndx.plt.get(elf).ni),
+            .node = .wrap(elf.shndx.plt.node(elf)),
             .name = "_PROCEDURE_LINKAGE_TABLE_",
             .value = elf.shndx.plt.vaddr(elf),
             .size = 0,
@@ -5967,7 +5974,7 @@ fn initHeaders(
             else => |e| return e,
         };
         _ = elf.addGlobalSymbol(.{
-            .node = .wrap(elf.shndx.got.get(elf).ni),
+            .node = .wrap(elf.shndx.got.node(elf)),
             .name = "_GLOBAL_OFFSET_TABLE_",
             .value = switch (machine) {
                 .AARCH64,
@@ -6085,7 +6092,7 @@ fn initHeaders(
         };
         if (have_dynamic) {
             _ = elf.addGlobalSymbol(.{
-                .node = .wrap(elf.shndx.dynamic.get(elf).ni),
+                .node = .wrap(elf.shndx.dynamic.node(elf)),
                 .name = "_DYNAMIC",
                 .value = elf.shndx.dynamic.vaddr(elf),
                 .size = 0,
@@ -6868,7 +6875,7 @@ const SymPtr = union(std.elf.CLASS) {
     @"64": *std.elf.Elf64.Sym,
 };
 fn symPtr(elf: *Elf, index: Symbol.Index) SymPtr {
-    const raw_slice = Section.Index.symtab.get(elf).ni.slice(&elf.mf);
+    const raw_slice = Section.Index.symtab.node(elf).slice(&elf.mf);
     switch (elf.shdrPtr(.symtab)) {
         inline else => |shdr, class| {
             const size = elf.targetLoad(&shdr.size);
@@ -6878,7 +6885,7 @@ fn symPtr(elf: *Elf, index: Symbol.Index) SymPtr {
     }
 }
 fn dynsymPtr(elf: *Elf, index: u32) SymPtr {
-    const raw_slice = elf.shndx.dynsym.get(elf).ni.slice(&elf.mf);
+    const raw_slice = elf.shndx.dynsym.node(elf).slice(&elf.mf);
     switch (elf.shdrPtr(elf.shndx.dynsym)) {
         inline else => |shdr, class| {
             const size = elf.targetLoad(&shdr.size);
@@ -6889,7 +6896,7 @@ fn dynsymPtr(elf: *Elf, index: u32) SymPtr {
 }
 
 fn versymSlice(elf: *Elf) []std.elf.Versym {
-    const raw_slice = elf.shndx.gnu_version.get(elf).ni.slice(&elf.mf);
+    const raw_slice = elf.shndx.gnu_version.node(elf).slice(&elf.mf);
     const size = elf.shndx.gnu_version.size(elf);
     return @ptrCast(@alignCast(raw_slice[0..@intCast(size)]));
 }
@@ -6903,7 +6910,7 @@ const VerdefEntry = extern struct {
     aux: std.elf.Verdaux,
 };
 fn verdefSlice(elf: *Elf) []VerdefEntry {
-    const raw_slice = elf.shndx.gnu_version_d.get(elf).ni.slice(&elf.mf);
+    const raw_slice = elf.shndx.gnu_version_d.node(elf).slice(&elf.mf);
     const size = elf.shndx.gnu_version_d.size(elf);
     return @ptrCast(@alignCast(raw_slice[0..@intCast(size)]));
 }
@@ -6916,7 +6923,7 @@ const VerneedEntry = extern union {
     }
 };
 fn verneedSlice(elf: *Elf) []VerneedEntry {
-    const raw_slice = elf.shndx.gnu_version_r.get(elf).ni.slice(&elf.mf);
+    const raw_slice = elf.shndx.gnu_version_r.node(elf).slice(&elf.mf);
     const size = elf.shndx.gnu_version_r.size(elf);
     return @ptrCast(@alignCast(raw_slice[0..@intCast(size)]));
 }
@@ -7101,7 +7108,7 @@ fn navMapIndex(elf: *Elf, zcu: *Zcu, nav_index: InternPool.Nav.Index) Error!Node
             },
         };
         try shndx.ensureAligned(elf, alignment);
-        const node = elf.addNodeAssumeCapacity(try shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
+        const node = elf.addNodeAssumeCapacity(try shndx.node(elf).addFloatingChild(gpa, &elf.mf, .{
             .alignment = alignment,
         }), .{ .nav = nmi });
         nav_gop.value_ptr.* = .{
@@ -7143,7 +7150,7 @@ fn uavMapIndex(
     if (!uav_gop.found_existing) {
         const shndx: Section.Index = .data_rel_ro; // TODO: it would be better to use `.rodata` if the UAV value doesn't have relocs
         try shndx.ensureAligned(elf, resolved_align);
-        const node = elf.addNodeAssumeCapacity(try shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
+        const node = elf.addNodeAssumeCapacity(try shndx.node(elf).addFloatingChild(gpa, &elf.mf, .{
             .moved = true, // see assert at end of `genUav`
             .alignment = resolved_align,
         }), .{ .uav = umi });
@@ -7603,7 +7610,7 @@ fn loadObject(
                 };
                 const ni = elf.addNodeAssumeCapacity(
                     if (opts.node_fixed) ni: {
-                        const shndx_ni = opts.shndx.get(elf).ni;
+                        const shndx_ni = opts.shndx.node(elf);
                         const after_oni: MappedFile.Node.Index.Optional = after: {
                             const last_ni = shndx_ni.last(&elf.mf).unwrap() orelse break :after .none;
                             break :after switch (last_ni.position(&elf.mf)) {
@@ -7612,7 +7619,7 @@ fn loadObject(
                             };
                         };
                         break :ni try shndx_ni.addHeaderChildAfter(gpa, &elf.mf, after_oni, add_node_opts);
-                    } else try opts.shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, add_node_opts),
+                    } else try opts.shndx.node(elf).addFloatingChild(gpa, &elf.mf, add_node_opts),
                     .{ .input_section = @fromBackingInt(@intCast(elf.input_sections.items.len)) },
                 );
                 section.isi = @fromBackingInt(@intCast(elf.input_sections.items.len));
@@ -8327,7 +8334,7 @@ fn createInitFiniArraySection(
         .version = null,
     }).?;
     try elf.setGlobalSymbolValue(start_gsi, .{
-        .node = .wrap(shndx.get(elf).ni),
+        .node = .wrap(shndx.node(elf)),
         .value = shndx.vaddr(elf),
         .size = 0,
         .type = .NOTYPE,
@@ -8335,7 +8342,7 @@ fn createInitFiniArraySection(
     });
     try elf.updateGlobalDynamic(start_gsi, true);
     try elf.setGlobalSymbolValue(end_gsi, .{
-        .node = .wrap(shndx.get(elf).ni),
+        .node = .wrap(shndx.node(elf)),
         .value = shndx.vaddr(elf),
         .size = 0,
         .type = .NOTYPE,
@@ -8388,7 +8395,7 @@ fn prelinkInner(elf: *Elf) Error!void {
         elf.shndx.debug_str_offsets,
     }) |debug_shndx| {
         if (debug_shndx == .UNDEF) continue;
-        const debug_ni = debug_shndx.get(elf).ni;
+        const debug_ni = debug_shndx.node(elf);
         const frame_format = debug_shndx.debugFrameFormat(elf);
         const unit_padding_ni = elf.addNodeAssumeCapacity(
             try debug_ni.addHeaderChildAfter(gpa, &elf.mf, last_header_oni: {
@@ -8444,7 +8451,7 @@ fn prelinkInner(elf: *Elf) Error!void {
             .UNDEF => {},
             else => |debug_addr_shndx| {
                 const debug_addr_ni = elf.addNodeAssumeCapacity(
-                    try debug_addr_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
+                    try debug_addr_shndx.node(elf).addFloatingChild(gpa, &elf.mf, .{
                         .alignment = addr_align,
                         .next_moved = true,
                         .enable_next_moved = true,
@@ -8465,7 +8472,7 @@ fn prelinkInner(elf: *Elf) Error!void {
         switch (elf.shndx.debug_abbrev) {
             .UNDEF => {},
             else => |debug_abbrev_shndx| elf.dwarf.debug_abbrev.ni = .wrap(elf.addNodeAssumeCapacity(
-                try debug_abbrev_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
+                try debug_abbrev_shndx.node(elf).addFloatingChild(gpa, &elf.mf, .{}),
                 .{ .debug_shared = .debug_abbrev },
             )),
         }
@@ -8473,14 +8480,14 @@ fn prelinkInner(elf: *Elf) Error!void {
             .UNDEF => {},
             else => |debug_line_str_shndx| elf.dwarf.debug_line_str.ni =
                 .wrap(elf.addNodeAssumeCapacity(
-                    try debug_line_str_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
+                    try debug_line_str_shndx.node(elf).addFloatingChild(gpa, &elf.mf, .{}),
                     .{ .debug_shared = .debug_line_str },
                 )),
         }
         switch (elf.shndx.debug_str) {
             .UNDEF => {},
             else => |debug_str_shndx| elf.dwarf.debug_str.ni = .wrap(elf.addNodeAssumeCapacity(
-                try debug_str_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
+                try debug_str_shndx.node(elf).addFloatingChild(gpa, &elf.mf, .{}),
                 .{ .debug_shared = .debug_str },
             )),
         }
@@ -8488,7 +8495,7 @@ fn prelinkInner(elf: *Elf) Error!void {
             .UNDEF => {},
             else => |debug_str_offsets_shndx| {
                 const debug_str_offsets_ni = elf.addNodeAssumeCapacity(
-                    try debug_str_offsets_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
+                    try debug_str_offsets_shndx.node(elf).addFloatingChild(gpa, &elf.mf, .{
                         .alignment = switch (elf.dwarf.format) {
                             .@"32" => .@"4",
                             .@"64" => .@"8",
@@ -8549,7 +8556,7 @@ fn zcuFilesReadyInner(elf: *Elf, zcu: *Zcu) Error!void {
             else => |debug_info_shndx| {
                 const debug_info_ni = unit.debug_info_ni.unwrap() orelse debug_info_ni: {
                     const debug_info_ni = elf.addNodeAssumeCapacity(
-                        try debug_info_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
+                        try debug_info_shndx.node(elf).addFloatingChild(gpa, &elf.mf, .{
                             .alignment = elf.mf.flags.block_size,
                             .enable_next_moved = true,
                         }),
@@ -8576,7 +8583,7 @@ fn zcuFilesReadyInner(elf: *Elf, zcu: *Zcu) Error!void {
             else => |debug_line_shndx| {
                 const debug_line_ni = unit.debug_line_ni.unwrap() orelse debug_line_ni: {
                     const debug_line_ni = elf.addNodeAssumeCapacity(
-                        try debug_line_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
+                        try debug_line_shndx.node(elf).addFloatingChild(gpa, &elf.mf, .{
                             .alignment = elf.mf.flags.block_size,
                             .enable_next_moved = true,
                         }),
@@ -8600,7 +8607,7 @@ fn zcuFilesReadyInner(elf: *Elf, zcu: *Zcu) Error!void {
             else => |debug_rnglists_shndx| {
                 const debug_rnglists_ni = unit.debug_rnglists_ni.unwrap() orelse debug_rnglists_ni: {
                     const debug_rnglists_ni = elf.addNodeAssumeCapacity(
-                        try debug_rnglists_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
+                        try debug_rnglists_shndx.node(elf).addFloatingChild(gpa, &elf.mf, .{
                             .next_moved = true,
                             .enable_next_moved = true,
                         }),
@@ -8680,7 +8687,7 @@ fn prepareDynamic(elf: *Elf) Error!void {
 
     const dynamic_size = dynamic_len * 2 * elf.targetPtrSize();
 
-    try elf.shndx.dynamic.get(elf).ni.resizeLeaf(comp.gpa, &elf.mf, dynamic_size);
+    try elf.shndx.dynamic.node(elf).resizeLeaf(comp.gpa, &elf.mf, dynamic_size);
     switch (elf.shdrPtr(elf.shndx.dynamic)) {
         inline else => |shdr| elf.targetStore(&shdr.size, @intCast(dynamic_size)),
     }
@@ -8702,7 +8709,7 @@ fn flushDynamic(elf: *Elf) void {
                 comp.config.pie);
 
             const dynamic_size = elf.targetLoad(&@field(elf.shdrPtr(elf.shndx.dynamic), @tagName(class)).size);
-            const dynamic_slice = elf.shndx.dynamic.get(elf).ni.slice(&elf.mf)[0..@intCast(dynamic_size)];
+            const dynamic_slice = elf.shndx.dynamic.node(elf).slice(&elf.mf)[0..@intCast(dynamic_size)];
             const dynamic_entries: [][2]ElfN.Addr = @ptrCast(@alignCast(dynamic_slice));
 
             var dynamic_index: usize = 0;
@@ -8896,7 +8903,7 @@ fn addSection(elf: *Elf, segment_ni: MappedFile.Node.Index, opts: struct {
             .type = .SECTION,
             .shndx = shndx,
         }) else .null,
-        .ni = ni,
+        .ni = .wrap(ni),
         .rela = switch (opts.type) {
             .REL => unreachable,
             .RELA => .{ .free_head = .none },
@@ -8973,7 +8980,7 @@ fn ensureUnusedRelocCapacity(elf: *Elf, node: MappedFile.Node.Index, len: usize)
                 .NONE, _ => unreachable,
                 inline else => |ct_class| (elf.got.count() + new_got_entries) * @sizeOf(ct_class.ElfN().Addr),
             };
-            try elf.shndx.got.get(elf).ni.ensureMinimumSize(gpa, &elf.mf, need_got_size);
+            try elf.shndx.got.node(elf).ensureMinimumSize(gpa, &elf.mf, need_got_size);
 
             if (elf.shndx.dynamic != .UNDEF) {
                 try elf.shndx.rela_dyn.relaEnsureAdditionalCapacity(elf, new_got_entries);
@@ -9816,7 +9823,7 @@ fn updateGotEntry(elf: *Elf, got_index: usize) void {
             const addr_size = @sizeOf(class.ElfN().Addr);
             const offset = got_index * addr_size;
             const entry_ptr: *class.ElfN().Addr = @ptrCast(@alignCast(
-                elf.shndx.got.get(elf).ni.slice(&elf.mf)[offset..][0..addr_size],
+                elf.shndx.got.node(elf).slice(&elf.mf)[offset..][0..addr_size],
             ));
             elf.targetStore(entry_ptr, switch (entry_value) {
                 .unsigned => |x| @intCast(x),
@@ -10179,7 +10186,7 @@ fn updateFuncInner(
                 const frame_ni = elf.addNodeAssumeCapacity(try switch (wip_func.frame_format) {
                     .debug_frame => elf.shndx.debug_frame,
                     .eh_frame => elf.shndx.eh_frame,
-                }.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
+                }.node(elf).addFloatingChild(gpa, &elf.mf, .{
                     .alignment = frame_align.max(elf.mf.flags.block_size),
                     .enable_next_moved = true,
                 }), .{ .unit_frame = wip_func.unit });
@@ -11904,17 +11911,17 @@ fn ensurePltEntry(elf: *Elf, gsi: Symbol.Global.Index) Error!bool {
     const gpa = elf.base.comp.gpa;
     try elf.shndx.rela_plt.relaEnsureAdditionalCapacity(elf, 1);
     try elf.plt.ensureUnusedCapacity(gpa, 1);
-    try elf.shndx.plt.get(elf).ni.ensureMinimumSize(
+    try elf.shndx.plt.node(elf).ensureMinimumSize(
         gpa,
         &elf.mf,
         plt.entry_size * (plt.header_entries + elf.plt.count() + 1),
     );
-    if (plt.got_plt) |got_plt| try elf.shndx.got_plt.get(elf).ni.ensureMinimumSize(
+    if (plt.got_plt) |got_plt| try elf.shndx.got_plt.node(elf).ensureMinimumSize(
         gpa,
         &elf.mf,
         elf.targetPtrSize() * (got_plt.header_entries + elf.plt.count() + 1),
     );
-    if (plt.plt_sec) |plt_sec| try elf.shndx.plt_sec.get(elf).ni.ensureMinimumSize(
+    if (plt.plt_sec) |plt_sec| try elf.shndx.plt_sec.node(elf).ensureMinimumSize(
         gpa,
         &elf.mf,
         plt_sec.entry_size * (elf.plt.count() + 1),
@@ -11962,7 +11969,7 @@ fn ensurePltEntry(elf: *Elf, gsi: Symbol.Global.Index) Error!bool {
     switch (elf.ehdrMachine()) {
         .AARCH64, .PPC64, .RISCV => |machine| @panic(@tagName(machine)),
         .X86_64 => {
-            const plt_ni = elf.shndx.plt.get(elf).ni;
+            const plt_ni = elf.shndx.plt.node(elf);
             const plt_addr = plt_addr: switch (elf.shdrPtr(elf.shndx.plt)) {
                 inline else => |shdr| {
                     const old_size = 16 * (1 + plt_index);
@@ -11986,7 +11993,7 @@ fn ensurePltEntry(elf: *Elf, gsi: Symbol.Global.Index) Error!bool {
                 },
             };
 
-            const got_plt_ni = elf.shndx.got_plt.get(elf).ni;
+            const got_plt_ni = elf.shndx.got_plt.node(elf);
             switch (elf.shdrPtr(elf.shndx.got_plt)) {
                 inline else => |shdr, class| {
                     assert(elf.targetLoad(&shdr.size) == got_plt_offset);
@@ -12000,7 +12007,7 @@ fn ensurePltEntry(elf: *Elf, gsi: Symbol.Global.Index) Error!bool {
                 },
             }
 
-            const plt_sec_ni = elf.shndx.plt_sec.get(elf).ni;
+            const plt_sec_ni = elf.shndx.plt_sec.node(elf);
             switch (elf.shdrPtr(elf.shndx.plt_sec)) {
                 inline else => |shdr| {
                     const old_size = 16 * plt_index;
@@ -12024,7 +12031,7 @@ fn ensurePltEntry(elf: *Elf, gsi: Symbol.Global.Index) Error!bool {
         },
         .LOONGARCH => {
             // add a .PLT entry, writing the template
-            const plt_ni = elf.shndx.plt.get(elf).ni;
+            const plt_ni = elf.shndx.plt.node(elf);
             const plt_addr, const plt_slice = plt_entry: switch (elf.shdrPtr(elf.shndx.plt)) {
                 inline else => |shdr| {
                     const old_size = 16 * (1 + plt_index);
@@ -12048,7 +12055,7 @@ fn ensurePltEntry(elf: *Elf, gsi: Symbol.Global.Index) Error!bool {
             };
 
             // add a .GOT.PLT entry, writing the address of the corresponding .PLT entry
-            const got_plt_ni = elf.shndx.got_plt.get(elf).ni;
+            const got_plt_ni = elf.shndx.got_plt.node(elf);
             switch (elf.shdrPtr(elf.shndx.got_plt)) {
                 inline else => |shdr, class| {
                     assert(elf.targetLoad(&shdr.size) == got_plt_offset);
@@ -12080,7 +12087,7 @@ fn ensurePltEntry(elf: *Elf, gsi: Symbol.Global.Index) Error!bool {
         },
         .SPARCV9 => {
             // add a .PLT entry, writing the template
-            const plt_ni = elf.shndx.plt.get(elf).ni;
+            const plt_ni = elf.shndx.plt.node(elf);
             switch (elf.shdrPtr(elf.shndx.plt)) {
                 inline else => |shdr| {
                     assert(elf.targetLoad(&shdr.size) == got_plt_offset);
@@ -12137,7 +12144,7 @@ fn flushMovedPltSection(elf: *Elf, which: enum { plt, plt_sec, got_plt }, old_ad
                     // We also need to update all of the references from `.plt.sec` to `.got.plt`.
                     // However, if there's also a flush pending for `.got.plt`, don't bother doing
                     // this now, because we'll do it when `.got.plt` is flushed anyway.
-                    if (elf.shndx.got_plt.get(elf).ni.hasMoved(&elf.mf)) {
+                    if (elf.shndx.got_plt.node(elf).hasMoved(&elf.mf)) {
                         return;
                     }
                     // Exit this `switch` to update those references.
@@ -12152,7 +12159,7 @@ fn flushMovedPltSection(elf: *Elf, which: enum { plt, plt_sec, got_plt }, old_ad
                     // We also need to update all of the references from `.plt.sec` to `.got.plt`.
                     // However, if there's also a flush pending for `.plt.sec`, don't bother doing
                     // this now, because we'll do it when `.plt.sec` is flushed anyway.
-                    if (elf.shndx.plt_sec.get(elf).ni.hasMoved(&elf.mf)) {
+                    if (elf.shndx.plt_sec.node(elf).hasMoved(&elf.mf)) {
                         return;
                     }
                     // Exit this `switch` to update those references.
@@ -12161,7 +12168,7 @@ fn flushMovedPltSection(elf: *Elf, which: enum { plt, plt_sec, got_plt }, old_ad
             // We are updating the references from `.plt.sec` to `.got.plt`.
             const got_plt_addr = elf.shndx.got_plt.vaddr(elf);
             const plt_sec_addr = elf.shndx.plt_sec.vaddr(elf);
-            const plt_sec_slice = elf.shndx.plt_sec.get(elf).ni.slice(&elf.mf);
+            const plt_sec_slice = elf.shndx.plt_sec.node(elf).slice(&elf.mf);
             switch (elf.identClass()) {
                 .NONE, _ => unreachable,
                 inline else => |class| {
@@ -12194,7 +12201,7 @@ fn flushMovedPltSection(elf: *Elf, which: enum { plt, plt_sec, got_plt }, old_ad
                     // We also need to update all of the references from `.plt` to `.got.plt`.
                     // However, if there's also a flush pending for `.got.plt`, don't bother doing
                     // this now, because we'll do it when `.got.plt` is flushed anyway.
-                    if (elf.shndx.got_plt.get(elf).ni.hasMoved(&elf.mf)) {
+                    if (elf.shndx.got_plt.node(elf).hasMoved(&elf.mf)) {
                         return;
                     }
                     // Exit this `switch` to update those references.
@@ -12210,7 +12217,7 @@ fn flushMovedPltSection(elf: *Elf, which: enum { plt, plt_sec, got_plt }, old_ad
                     // We also need to update all of the references from `.plt` to `.got.plt`.
                     // However, if there's also a flush pending for `.plt`, don't bother doing
                     // this now, because we'll do it when `.plt` is flushed anyway.
-                    if (elf.shndx.plt.get(elf).ni.hasMoved(&elf.mf)) {
+                    if (elf.shndx.plt.node(elf).hasMoved(&elf.mf)) {
                         return;
                     }
                     // Exit this `switch` to update those references.
@@ -12219,7 +12226,7 @@ fn flushMovedPltSection(elf: *Elf, which: enum { plt, plt_sec, got_plt }, old_ad
             // We are updating the references from `.plt` to `.got.plt`.
             const got_plt_addr = elf.shndx.got_plt.vaddr(elf);
             const plt_addr = elf.shndx.plt.vaddr(elf);
-            const plt_slice = elf.shndx.plt.get(elf).ni.slice(&elf.mf);
+            const plt_slice = elf.shndx.plt.node(elf).slice(&elf.mf);
             switch (elf.identClass()) {
                 .NONE, _ => unreachable,
                 inline else => |class| {
@@ -12657,7 +12664,7 @@ const VerdefAdapter = struct {
 fn verdefId(elf: *Elf, version: String(.dynstr)) Error!u15 {
     const gpa = elf.base.comp.gpa;
     const adapter: VerdefAdapter = .{ .elf = elf };
-    try elf.shndx.gnu_version_d.get(elf).ni.ensureMinimumSize(gpa, &elf.mf, (elf.verdef.count() + 2) * @sizeOf(VerdefEntry));
+    try elf.shndx.gnu_version_d.node(elf).ensureMinimumSize(gpa, &elf.mf, (elf.verdef.count() + 2) * @sizeOf(VerdefEntry));
     const gop = try elf.verdef.getOrPutAdapted(gpa, version, adapter);
 
     if (gop.found_existing) {
@@ -12766,7 +12773,7 @@ const VerneedAdapter = struct {
 fn verneedId(elf: *Elf, file: String(.dynstr), version: String(.dynstr)) Error!u15 {
     const gpa = elf.base.comp.gpa;
     const adapter: VerneedAdapter = .{ .elf = elf };
-    try elf.shndx.gnu_version_r.get(elf).ni.ensureMinimumSize(gpa, &elf.mf, (elf.verneed.count() + 2) * @sizeOf(VerneedEntry));
+    try elf.shndx.gnu_version_r.node(elf).ensureMinimumSize(gpa, &elf.mf, (elf.verneed.count() + 2) * @sizeOf(VerneedEntry));
 
     if (elf.verneed.getIndexAdapted(@as(VerneedAdapter.Key, .{
         .file = file,
