@@ -6381,11 +6381,11 @@ fn getNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
     };
 }
 
-fn tbssSegmentOffset(elf: *Elf) u64 {
+fn tbssBaseOffset(elf: *Elf) u64 {
     const tbss_addr = elf.shndx.tbss.vaddr(elf);
 
     // Hasn't been laid out yet.
-    if (tbss_addr == 0) return 0;
+    if (tbss_addr == 0 or elf.ehdrType() == .REL) return 0;
 
     const tls_ni = elf.ni.tls.unwrap().?;
     const tls_phndx = elf.getNode(tls_ni).segment;
@@ -7016,6 +7016,7 @@ fn mapInputSection(elf: *Elf, opts: struct {
     StripSection,
     SectionFlagsConflict,
     SectionTypeConflict,
+    UnsupportedNobitsSection,
 })!Section.Index {
     const gpa = elf.base.comp.gpa;
     if (opts.flags.INFO_LINK or
@@ -7073,7 +7074,8 @@ fn mapInputSection(elf: *Elf, opts: struct {
             .name = name,
             .type = switch (opts.type) {
                 .PROGBITS => .NULL, // size is 0
-                .NOBITS => .NOBITS,
+                .X86_64_UNWIND => .X86_64_UNWIND,
+                .NOBITS => return error.UnsupportedNobitsSection,
                 else => unreachable,
             },
             .flags = flags: {
@@ -7099,7 +7101,7 @@ fn mapInputSection(elf: *Elf, opts: struct {
             const existing_type = elf.targetLoad(&shdr.type);
 
             switch (opts.type) {
-                .PROGBITS => switch (existing_type) {
+                .PROGBITS, .X86_64_UNWIND => switch (existing_type) {
                     .NULL, .PROGBITS, .X86_64_UNWIND => {},
                     else => return error.SectionTypeConflict,
                 },
@@ -7157,6 +7159,7 @@ fn navMapIndex(elf: *Elf, zcu: *Zcu, nav_index: InternPool.Nav.Index) Error!Node
                     error.UnsupportedSectionFlags,
                     error.SectionTypeConflict,
                     error.SectionFlagsConflict,
+                    error.UnsupportedNobitsSection,
                     => {}, // fall back to default behavior below
 
                 }
@@ -7548,16 +7551,15 @@ fn loadObject(
 
             const sections = try gpa.alloc(struct {
                 shdr: ElfN.Shdr,
-                placement: ?union(enum) {
+                placement: union(enum) {
                     progbits: InputSection.Index,
                     bss: struct {
-                        shndx: Section.Index,
                         offset: u64,
                     },
                     tbss: struct {
-                        shndx: Section.Index,
                         offset: u64,
                     },
+                    none,
                 },
             }, ehdr.shnum);
 
@@ -7566,7 +7568,7 @@ fn loadObject(
             for (sections) |*section| {
                 section.* = .{
                     .shdr = try r.peekStruct(ElfN.Shdr, target_endian),
-                    .placement = null,
+                    .placement = .none,
                 };
                 try r.discardAll(ehdr.shentsize);
                 switch (section.shdr.type) {
@@ -7594,10 +7596,6 @@ fn loadObject(
                 const name = std.mem.sliceTo(shstrtab[section.shdr.name..], 0);
                 if (!comp.config.any_unwind_tables and std.mem.eql(u8, name, ".eh_frame")) continue;
                 const sect_type = section.shdr.type;
-                const is_bss = (std.mem.startsWith(u8, name, ".bss.") or
-                    std.mem.eql(u8, name, ".bss")) and sect_type == .NOBITS;
-                const is_tbss = (std.mem.startsWith(u8, name, ".tbss.") or
-                    std.mem.eql(u8, name, ".tbss")) and sect_type == .NOBITS;
                 const opts: struct {
                     shndx: Section.Index,
                     node_fixed: bool,
@@ -7608,7 +7606,7 @@ fn loadObject(
                             .name = name,
                             .flags = section.shdr.flags.shf,
                             .entsize = section.shdr.entsize,
-                            .type = if (is_bss or is_tbss) .NOBITS else .PROGBITS,
+                            .type = section.shdr.type,
                         }) catch |err| switch (err) {
                             else => |e| return e,
                             error.StripSection => continue,
@@ -7641,6 +7639,11 @@ fn loadObject(
                                 "flags of section '{s}' conflict with other inputs",
                                 .{name},
                             ),
+                            error.UnsupportedNobitsSection => return diags.failParse(
+                                path,
+                                "unsupported section type SHT_NOBITS for non-bss section '{s}'",
+                                .{name},
+                            ),
                         };
                         if (section.shdr.flags.shf.COMPRESSED) {
                             // SHF_COMPRESSED is only allowed on non-alloc sections.
@@ -7664,8 +7667,7 @@ fn loadObject(
                                 shndx != .rodata and
                                 shndx != .data and
                                 shndx != .data_rel_ro and
-                                shndx != elf.shndx.tdata and
-                                shndx != elf.shndx.tbss,
+                                shndx != elf.shndx.tdata,
                         };
                     },
                     inline .INIT_ARRAY, .FINI_ARRAY, .PREINIT_ARRAY => |@"type"| .{
@@ -7711,35 +7713,25 @@ fn loadObject(
 
                 try opts.shndx.ensureAligned(elf, need_align);
 
-                if (is_bss or is_tbss) {
-                    const offset: u64 = offset: {
-                        switch (elf.shdrPtr(opts.shndx)) {
-                            inline else => |shdr| {
-                                // Bump our BSS output section size.
-                                const old_size: u64 = elf.targetLoad(&shdr.size);
-                                const offset = need_align.forward(old_size);
-                                const new_size = offset + section.shdr.size;
-                                elf.targetStore(&shdr.size, @intCast(new_size));
-                                break :offset offset;
-                            },
-                        }
+                if (sect_type == .NOBITS) {
+                    const offset: u64 = switch (elf.shdrPtr(opts.shndx)) {
+                        inline else => |shdr| offset: {
+                            // Bump our BSS output section size
+                            const old_size: u64 = elf.targetLoad(&shdr.size);
+                            const offset = need_align.forward(old_size);
+                            elf.targetStore(&shdr.size, @intCast(offset + section.shdr.size));
+                            break :offset offset;
+                        },
                     };
 
-                    if (is_bss) {
-                        section.placement = .{ .bss = .{
-                            .shndx = opts.shndx,
-                            .offset = offset,
-                        } };
+                    if (opts.shndx == elf.shndx.bss) {
+                        section.placement = .{ .bss = .{ .offset = offset } };
                         input_has_bss = true;
-                        continue;
-                    }
-
-                    if (is_tbss) {
-                        section.placement = .{ .tbss = .{
-                            .shndx = opts.shndx,
-                            .offset = offset,
-                        } };
+                    } else if (opts.shndx == elf.shndx.tbss) {
+                        section.placement = .{ .tbss = .{ .offset = offset } };
                         input_has_tbss = true;
+                    } else {
+                        unreachable;
                     }
 
                     continue;
@@ -7861,8 +7853,9 @@ fn loadObject(
                             },
                         };
 
-                        const placement =
-                            sections[input_sym.shndx].placement orelse continue;
+                        const placement = sections[input_sym.shndx].placement;
+
+                        if (placement == .none) continue;
 
                         const symbol_oni: MappedFile.Node.Index.Optional, const output_shndx, const symbol_value = switch (placement) {
                             .progbits => |isi| .{
@@ -7871,20 +7864,16 @@ fn loadObject(
                                 input_sym.value,
                             },
                             .bss => |bss| .{
-                                bss.shndx.get(elf).ni,
-                                bss.shndx,
-                                bss.shndx.vaddr(elf) + bss.offset + input_sym.value,
+                                .none,
+                                elf.shndx.bss,
+                                elf.shndx.bss.vaddr(elf) + bss.offset + input_sym.value,
                             },
                             .tbss => |tbss| .{
-                                tbss.shndx.get(elf).ni,
-                                tbss.shndx,
-                                switch (elf.ehdrType()) {
-                                    .REL => tbss.offset + input_sym.value,
-                                    .EXEC, .DYN => elf.tbssSegmentOffset() +
-                                        tbss.offset +
-                                        input_sym.value,
-                                },
+                                .none,
+                                elf.shndx.tbss,
+                                elf.tbssBaseOffset() + tbss.offset + input_sym.value,
                             },
+                            .none => unreachable,
                         };
 
                         switch (input_sym.info.bind) {
@@ -7949,7 +7938,8 @@ fn loadObject(
                                 return diags.failParse(path, "unsupported rel entsize", .{});
 
                             const loc_sec = &sections[rel_sec.shdr.info];
-                            const loc_node = switch (loc_sec.placement orelse continue) {
+                            const loc_node = switch (loc_sec.placement) {
+                                .none => continue,
                                 .progbits => |isi| isi.node(elf),
                                 .bss, .tbss => return diags.failParse(
                                     path,
@@ -9007,6 +8997,8 @@ fn flushDynamic(elf: *Elf) void {
 
 fn addSection(elf: *Elf, segment_ni: MappedFile.Node.Index, opts: struct {
     name: []const u8 = "",
+    /// If this is `.NOBITS`, then the section's address is initialized to 0, and it is the caller's
+    /// responsibility to populate it.
     type: std.elf.SHT = .NULL,
     flags: std.elf.SHF = .{},
     size: std.elf.Xword = 0,
@@ -11229,7 +11221,7 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                         },
 
                         .TLS => {
-                            const tbss_base = elf.tbssSegmentOffset();
+                            const tbss_base = elf.tbssBaseOffset();
                             const new_vaddr = elf.computeNodeVAddr(ni);
                             const tls_offset = elf.targetLoad(&ph.offset);
                             const tls_filesz = elf.targetLoad(&ph.filesz);
@@ -11237,16 +11229,17 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                             elf.targetStore(&ph.vaddr, @intCast(new_vaddr));
                             elf.targetStore(&ph.paddr, @intCast(new_vaddr));
 
-                            // This may seem like a no-op since we're moving to and fro the same base,
-                            // but we also need to update the section STT_SECTION symbol, which this
-                            // function will conveniently do for us.
-                            elf.updateNobitsAddress(
-                                elf.shndx.tbss,
-                                new_vaddr + tbss_base,
-                                tls_offset + tls_filesz,
-                                tbss_base,
-                                tbss_base,
-                                elf.tbss_inputs.items,
+                            const tbss_shndx = elf.shndx.tbss;
+                            const tbss_addr = new_vaddr + tbss_base;
+                            switch (elf.shdrPtr(tbss_shndx)) {
+                                inline else => |shdr| {
+                                    elf.targetStore(&shdr.addr, @intCast(tbss_addr));
+                                    elf.targetStore(&shdr.offset, @intCast(tls_offset + tls_filesz));
+                                },
+                            }
+                            Symbol.Id.local(tbss_shndx.get(elf).lsi).flushMoved(
+                                elf,
+                                tbss_addr,
                             );
                         },
                     }
@@ -11651,6 +11644,34 @@ fn updateNobitsAddress(
     );
 }
 
+fn loadSegmentChildrenMoved(
+    elf: *Elf,
+    segment_ni: MappedFile.Node.Index,
+    old_vaddr: u64,
+    new_vaddr: u64,
+    offset: u64,
+    filesz: u64,
+) std.mem.Allocator.Error!void {
+    if (segment_ni == elf.ni.data and elf.shndx.bss != .UNDEF) {
+        const bss_shndx = elf.shndx.bss;
+        const old_bss_addr = bss_shndx.vaddr(elf);
+        const new_bss_addr = new_vaddr + filesz;
+
+        elf.updateNobitsAddress(
+            bss_shndx,
+            new_bss_addr,
+            offset + filesz,
+            old_bss_addr,
+            new_bss_addr,
+            elf.bss_inputs.items,
+        );
+    }
+
+    if (old_vaddr != new_vaddr) {
+        try segment_ni.childrenMoved(elf.base.comp.gpa, &elf.mf);
+    }
+}
+
 /// Given the index of a `PT_LOAD`/`PT_NULL` segment, assumes that the phdr's `offset` and `filesz`
 /// have been updated as needed by the caller, and updates the `@"align"`, `vaddr`, `paddr`, and
 /// `memsz` fields of the segment, in order to place it at a valid virtual address.
@@ -11693,6 +11714,8 @@ fn allocateSegmentLoadAddress(elf: *Elf, orig_phndx: u32) std.mem.Allocator.Erro
             var vaddr: u64 = orig_vaddr;
 
             elf.targetStore(&phdr[orig_phndx].@"align", @intCast(ph_align.toByteUnits()));
+            elf.targetStore(&phdr[orig_phndx].memsz, @intCast(memsz));
+            elf.targetStore(&phdr[orig_phndx].type, if (memsz > 0) .LOAD else .NULL);
 
             // First, we will shift the virtual address as needed in order to maintain the required
             // property that vaddr is congruent to offset modulo the phdr alignment.
@@ -11770,21 +11793,14 @@ fn allocateSegmentLoadAddress(elf: *Elf, orig_phndx: u32) std.mem.Allocator.Erro
                         elf.targetStore(&next_ph.vaddr, @intCast(next_new_vaddr));
                         elf.targetStore(&next_ph.paddr, @intCast(next_new_vaddr));
 
-                        const bss_shndx = elf.shndx.bss;
                         const next_filesz = elf.targetLoad(&next_ph.filesz);
-                        const old_bss_addr = bss_shndx.vaddr(elf);
-                        const new_bss_addr = next_new_vaddr + next_filesz;
-
-                        elf.updateNobitsAddress(
-                            bss_shndx,
-                            new_bss_addr,
-                            next_offset + next_filesz,
-                            old_bss_addr,
-                            new_bss_addr,
-                            elf.bss_inputs.items,
+                        try elf.loadSegmentChildrenMoved(
+                            next_ni,
+                            next_vaddr,
+                            next_new_vaddr,
+                            next_offset,
+                            next_filesz,
                         );
-
-                        try next_ni.childrenMoved(elf.base.comp.gpa, &elf.mf);
 
                         break;
                     },
@@ -11809,29 +11825,15 @@ fn allocateSegmentLoadAddress(elf: *Elf, orig_phndx: u32) std.mem.Allocator.Erro
             if (vaddr != orig_vaddr) {
                 elf.targetStore(&phdr[phndx].vaddr, @intCast(vaddr));
                 elf.targetStore(&phdr[phndx].paddr, @intCast(vaddr));
-                try segment_ni.childrenMoved(elf.base.comp.gpa, &elf.mf);
             }
 
-            const ph = &phdr[phndx];
-
-            elf.targetStore(&ph.memsz, @intCast(memsz));
-            elf.targetStore(&ph.type, if (memsz > 0) .LOAD else .NULL);
-
-            if (segment_ni == elf.ni.data and elf.shndx.bss != .UNDEF) {
-                const bss_shndx = elf.shndx.bss;
-
-                const old_bss_addr = bss_shndx.vaddr(elf);
-                const new_bss_addr = vaddr + filesz;
-
-                elf.updateNobitsAddress(
-                    bss_shndx,
-                    new_bss_addr,
-                    offset + filesz,
-                    old_bss_addr,
-                    new_bss_addr,
-                    elf.bss_inputs.items,
-                );
-            }
+            try elf.loadSegmentChildrenMoved(
+                segment_ni,
+                orig_vaddr,
+                vaddr,
+                offset,
+                filesz,
+            );
         },
     }
 }
@@ -11867,7 +11869,6 @@ fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
                 switch (elf.targetLoad(&ph.type)) {
                     else => unreachable,
                     .NULL, .LOAD => {
-                        elf.targetStore(&ph.type, if (size > 0) .LOAD else .NULL);
                         try elf.allocateSegmentLoadAddress(phndx);
                     },
                     .DYNAMIC, .INTERP, .PHDR, .GNU_EH_FRAME, .GNU_RELRO => {
@@ -11876,7 +11877,7 @@ fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
                     .TLS => {
                         const tls_filesz: u64 = size;
 
-                        const old_tbss_base = elf.tbssSegmentOffset();
+                        const old_tbss_base = elf.tbssBaseOffset();
                         const new_tbss_base = tls_filesz;
                         const tbss_size = elf.shndx.tbss.size(elf);
                         const tls_vaddr = elf.targetLoad(&ph.vaddr);
