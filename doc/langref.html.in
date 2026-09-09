@@ -1894,20 +1894,77 @@ const B = error{Two};
       </div>
       {#header_close#}
       {#header_open|Precedence#}
+      <p>
+      Zig features partial operator precedence: not every operator has a defined precedence with
+      every other operator. Mixing operators with ambiguous precedence is prohibited and parentheses
+      are mandatory. Consequently, valid code is typically auto-descriptive; when reading and
+      writing Zig code, there are very few precedence rules you'll need to remember.
+      </p>
+
+      {#code|operator_precedence.zig#}
+
+      {#code|ambiguous_precedence_orelse.zig#}
+
+      <p>
+      Simplified operator precedence tables are provided below, each tailored to a general group of
+      operators. For all of the groups shown below, the operators that have higher precedence are
+      the same, and themselves have the following precedence table:
+      </p>
+
       <pre>{#syntax#}x() x[] x.y x.* x.?
 a!b
 x{}
-!x -x -%x ~x &x ?x try
-* / % *% *| ||
-+ - ++ +% -% +| -|
-<< >> <<|
-& ^ | orelse catch
-== != < > <= >=
-and
-or
-= *= *%= *|= /= %= += +%= +|= -= -%= -|= <<= <<|= >>= &= ^= |={#endsyntax#}</pre>
-      {#header_close#}
+!x -x -%x ~x &x ?x try{#endsyntax#}</pre>
 
+      <p>
+      For the tables below, the operators that have ambiguous precedence or semantic errors with the
+      given operators have been omitted, as have operators with higher precedence. 
+      The operators colored <span style="color: #C54675;">red</span> and
+      <span style="color: #419AFF;">blue</span> have ambiguous precedence with the other operators
+      on the same line. Those colored <span style="color: #C54675;">red</span> also have ambiguous
+      precedence with themselves (they cannot be chained).
+      </p>
+
+      <p>
+      For arithmetic operators:
+      </p>
+
+      <pre><code>* / *% *| <span style="color: #C54675;">%</span>
++ - +% -% +| -|
+<span style="color: #C54675;">== != &lt; > &lt;= >=</span>
+<span style="color: #419AFF;">and or</span></code></pre>
+
+      <p>
+      For bitwise operators:
+      </p>
+
+      <pre><code><span style="color: #C54675;">&lt;&lt; &lt;&lt;| >></span> <span style="color: #419AFF;">& ^ |</span>
+<span style="color: #C54675;">== != &lt; > &lt;= >=</span>
+<span style="color: #419AFF;">and or</span></code></pre>
+
+      <p>
+      For null and error recovery operators:
+      </p>
+
+      <pre><code><span style="color: #419AFF;">catch orelse</span></code></pre>
+
+      <p>
+      For error set operators:
+      </p>
+
+      <pre>{#syntax#}||{#endsyntax#}</pre>
+
+      <p>
+      For array concatenation operators:
+      </p>
+
+      <pre>{#syntax#}++{#endsyntax#}</pre>
+
+      <p>
+      The full precedence rules can be found in the {#link|Grammar#}, which also includes an {#link|Operator Precedence Flowchart#}.
+      </p>
+
+      {#header_close#}
       {#header_close#}
 
       {#header_open|Arrays#}
