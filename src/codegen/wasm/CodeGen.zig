@@ -1338,11 +1338,21 @@ const SimdStoreStrategy = enum {
 /// it using a instruction, rather than an unrolled version.
 pub fn determineSimdStoreStrategy(ty: Type, zcu: *const Zcu, target: *const std.Target) SimdStoreStrategy {
     assert(ty.zigTypeTag(zcu) == .vector);
-    if (ty.bitSize(zcu) != 128) return .unrolled;
-    if (target.cpu.has(.wasm, .relaxed_simd) or target.cpu.has(.wasm, .simd128)) {
-        return .direct;
-    }
-    return .unrolled;
+    if (!target.cpu.has(.wasm, .simd128)) return .unrolled;
+    return switch (ty.toIntern()) {
+        .vector_16_i8_type,
+        .vector_16_u8_type,
+        .vector_8_i16_type,
+        .vector_8_u16_type,
+        .vector_4_i32_type,
+        .vector_4_u32_type,
+        .vector_2_i64_type,
+        .vector_2_u64_type,
+        .vector_4_f32_type,
+        .vector_2_f64_type,
+        => .direct,
+        else => .unrolled,
+    };
 }
 
 fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -5188,12 +5198,27 @@ fn lowerConstant(cg: *CodeGen, val: Value) InnerError!WValue {
         } else {
             return .{ .imm32 = @intFromBool(!val.isNull(zcu)) };
         },
-        .aggregate => switch (ip.indexToKey(ty.ip_index)) {
-            .array_type => return cg.fail("Wasm TODO: LowerConstant for {f}", .{ty.fmt(zcu)}),
-            .vector_type => {
+        .aggregate => |aggregate| switch (ip.indexToKey(ty.ip_index)) {
+            .array_type => unreachable,
+            .vector_type => |vector_type| {
                 assert(determineSimdStoreStrategy(ty, zcu, cg.target) == .direct);
                 var buf: [16]u8 = undefined;
-                val.writeToMemory(zcu, &buf) catch unreachable;
+                const elem_size: usize = @intCast(Type.fromInterned(vector_type.child).abiSize(zcu));
+                for (0..vector_type.len) |i| {
+                    const dest = buf[i * elem_size ..][0..elem_size];
+                    const elem: Value = switch (aggregate.storage) {
+                        .bytes => |bytes| {
+                            dest[0] = bytes.at(i, ip);
+                            continue;
+                        },
+                        .elems => |elems| .fromInterned(elems[i]),
+                        .repeated_elem => |elem| .fromInterned(elem),
+                    };
+                    elem.writeToMemory(zcu, dest) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.ReinterpretDeclRef, error.IllDefinedMemoryLayout => unreachable,
+                    };
+                }
                 return cg.storeSimdImmd(buf);
             },
             .struct_type => unreachable, // packed structs use `bitpack`
@@ -5216,6 +5241,7 @@ fn storeSimdImmd(cg: *CodeGen, value: [16]u8) !WValue {
 fn emitUndefined(cg: *CodeGen, ty: Type) InnerError!WValue {
     const zcu = cg.pt.zcu;
     switch (ty.zigTypeTag(zcu)) {
+        .vector => return cg.storeSimdImmd(@splat(0xaa)),
         .bool, .error_set => return .{ .imm32 = 0xaaaaaaaa },
         .int, .@"enum" => switch (ty.intInfo(zcu).bits) {
             0...32 => return .{ .imm32 = 0xaaaaaaaa },
@@ -5785,7 +5811,7 @@ fn bitcast(cg: *CodeGen, dest_ty: Type, src_ty: Type, operand: WValue) InnerErro
             .f80, .f128 => unreachable,
         },
         .int => {},
-        .aggregate => unreachable,
+        .aggregate => return operand, // both v128
     }
 
     switch (dest_class) {
@@ -6991,22 +7017,49 @@ fn airAggregateInit(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const result: WValue = result_value: {
         switch (result_ty.zigTypeTag(zcu)) {
             .array, .vector => {
-                const result = try cg.allocStack(result_ty);
                 const elem_ty = result_ty.childType(zcu);
-                const elem_size = elem_ty.abiSize(zcu);
-                const sentinel = result_ty.sentinel(zcu);
+                if (isByRef(result_ty, zcu, cg.target)) {
+                    const result = try cg.allocStack(result_ty);
+                    const elem_size = elem_ty.abiSize(zcu);
+                    const sentinel = result_ty.sentinel(zcu);
 
-                var offset: u64 = 0;
-                for (elements) |elem| {
-                    const elem_val = try cg.resolveInst(elem);
-                    try cg.store(result, elem_val, elem_ty, .{ .offset = offset });
-                    offset += elem_size;
+                    var offset: u64 = 0;
+                    for (elements) |elem| {
+                        const elem_val = try cg.resolveInst(elem);
+                        try cg.store(result, elem_val, elem_ty, .{ .offset = offset });
+                        offset += elem_size;
+                    }
+                    if (sentinel) |s| {
+                        const val = try cg.resolveValue(s);
+                        try cg.store(result, val, elem_ty, .{ .offset = offset });
+                    }
+                    break :result_value result;
+                } else {
+                    assert(result_ty.zigTypeTag(zcu) == .vector);
+                    const splat: std.wasm.SimdOpcode, const replace_lane: std.wasm.SimdOpcode = switch (elem_ty.toIntern()) {
+                        .u8_type, .i8_type => .{ .i8x16_splat, .i8x16_replace_lane },
+                        .u16_type, .i16_type => .{ .i16x8_splat, .i16x8_replace_lane },
+                        .u32_type, .i32_type => .{ .i32x4_splat, .i32x4_replace_lane },
+                        .u64_type, .i64_type => .{ .i64x2_splat, .i64x2_replace_lane },
+                        .f32_type => .{ .f32x4_splat, .f32x4_replace_lane },
+                        .f64_type => .{ .f64x2_splat, .f64x2_replace_lane },
+                        else => unreachable,
+                    };
+
+                    // TODO: find best element to splat, if it is constant dont use splat at all
+                    try cg.emitWValue(try cg.resolveInst(elements[0]));
+                    const splat_extra: u32 = @intCast(cg.mir_extra.items.len);
+                    try cg.mir_extra.append(cg.gpa, @backingInt(splat));
+                    try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = splat_extra } });
+                    for (elements[1..], 1..) |elem, lane| {
+                        if (elem == elements[0]) continue;
+                        try cg.emitWValue(try cg.resolveInst(elem));
+                        const extra_index: u32 = @intCast(cg.mir_extra.items.len);
+                        try cg.mir_extra.appendSlice(cg.gpa, &.{ @backingInt(replace_lane), @intCast(lane) });
+                        try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
+                    }
+                    break :result_value .stack;
                 }
-                if (sentinel) |s| {
-                    const val = try cg.resolveValue(s);
-                    try cg.store(result, val, elem_ty, .{ .offset = offset });
-                }
-                break :result_value result;
             },
             .@"struct" => switch (result_ty.containerLayout(zcu)) {
                 .@"packed" => unreachable, // legalize .expand_packed_aggregate_init
@@ -7633,7 +7686,7 @@ fn airCmpxchg(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             1 => .i32_atomic_rmw8_cmpxchg_u,
             2 => .i32_atomic_rmw16_cmpxchg_u,
             4 => .i32_atomic_rmw_cmpxchg,
-            8 => .i32_atomic_rmw_cmpxchg,
+            8 => .i64_atomic_rmw_cmpxchg,
             else => |size| return cg.fail("TODO: implement `@cmpxchg` for types with abi size '{d}'", .{size}),
         }, .{
             .offset = ptr_operand.memOffset(),
@@ -7721,6 +7774,9 @@ fn airAtomicRmw(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const op: std.lang.AtomicRmwOp = extra.op();
 
     if (cg.useAtomicFeature()) {
+        if (ty.isAnyFloat()) {
+            return cg.fail("TODO: atomic rmw on floats", .{});
+        }
         const int_ty: IntType = .fromType(cg, ty);
         switch (op) {
             .Max,
