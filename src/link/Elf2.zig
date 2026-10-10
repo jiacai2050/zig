@@ -7625,11 +7625,15 @@ fn loadObject(
                         }) catch |err| switch (err) {
                             else => |e| return e,
                             error.StripSection => continue,
-                            error.TlsSectionUnavailable => return diags.failParse(
-                                path,
-                                "thread-local storage section '{s}' is incompatible with '-fsingle-threaded'",
-                                .{name},
-                            ),
+                            error.TlsSectionUnavailable => {
+                                if (section.shdr.size == 0) continue;
+
+                                return diags.failParse(
+                                    path,
+                                    "thread-local storage section '{s}' is incompatible with '-fsingle-threaded'",
+                                    .{name},
+                                );
+                            },
                             error.UnsupportedSectionFlags => if (!section.shdr.flags.shf.ALLOC) {
                                 // It probably doesn't matter, just skip this section.
                                 continue;
