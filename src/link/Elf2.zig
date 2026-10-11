@@ -11906,7 +11906,12 @@ fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
                         const tls_vaddr = elf.targetLoad(&ph.vaddr);
                         const tls_offset = elf.targetLoad(&ph.offset);
 
-                        elf.targetStore(&ph.memsz, @intCast(tls_filesz + tbss_size));
+                        const tls_memsz = std.mem.alignForward(
+                            u64,
+                            tls_filesz + tbss_size,
+                            elf.targetLoad(&ph.@"align"),
+                        );
+                        elf.targetStore(&ph.memsz, @intCast(tls_memsz));
 
                         elf.updateNobitsAddress(
                             elf.shndx.tbss,
