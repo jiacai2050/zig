@@ -7090,7 +7090,7 @@ fn mapInputSection(elf: *Elf, opts: struct {
             .type = switch (opts.type) {
                 .PROGBITS => .NULL, // size is 0
                 .X86_64_UNWIND => .X86_64_UNWIND,
-                .NOBITS => return error.UnsupportedNobitsSection,
+                .NOBITS => if (elf.ehdrType() == .REL) .NOBITS else return error.UnsupportedNobitsSection,
                 else => unreachable,
             },
             .flags = flags: {
@@ -7568,10 +7568,8 @@ fn loadObject(
                 shdr: ElfN.Shdr,
                 placement: union(enum) {
                     progbits: InputSection.Index,
-                    bss: struct {
-                        offset: u64,
-                    },
-                    tbss: struct {
+                    nobits: struct {
+                        shndx: Section.Index,
                         offset: u64,
                     },
                     none,
@@ -7743,14 +7741,16 @@ fn loadObject(
                         },
                     };
 
+                    section.placement = .{ .nobits = .{
+                        .shndx = opts.shndx,
+                        .offset = offset,
+                    } };
                     if (opts.shndx == elf.shndx.bss) {
-                        section.placement = .{ .bss = .{ .offset = offset } };
                         input_has_bss = true;
                     } else if (opts.shndx == elf.shndx.tbss) {
-                        section.placement = .{ .tbss = .{ .offset = offset } };
                         input_has_tbss = true;
                     } else {
-                        unreachable;
+                        assert(elf.ehdrType() == .REL);
                     }
 
                     continue;
@@ -7882,15 +7882,15 @@ fn loadObject(
                                 elf.getNodeShndx(isi.node(elf)),
                                 input_sym.value,
                             },
-                            .bss => |bss| .{
+                            .nobits => |nobits| .{
                                 .none,
-                                elf.shndx.bss,
-                                elf.shndx.bss.vaddr(elf) + bss.offset + input_sym.value,
-                            },
-                            .tbss => |tbss| .{
-                                .none,
-                                elf.shndx.tbss,
-                                elf.tbssBaseOffset() + tbss.offset + input_sym.value,
+                                nobits.shndx,
+                                (if (elf.ehdrType() == .REL)
+                                    @as(u64, 0)
+                                else if (nobits.shndx.flags(elf).TLS)
+                                    elf.tbssBaseOffset()
+                                else
+                                    nobits.shndx.vaddr(elf)) + nobits.offset + input_sym.value,
                             },
                             .none => unreachable,
                         };
@@ -7960,7 +7960,7 @@ fn loadObject(
                             const loc_node = switch (loc_sec.placement) {
                                 .none => continue,
                                 .progbits => |isi| isi.node(elf),
-                                .bss, .tbss => return diags.failParse(
+                                .nobits => return diags.failParse(
                                     path,
                                     "relocations applying to BSS (SHT_NOBITS) sections are unsupported",
                                     .{},
