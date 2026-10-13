@@ -8013,7 +8013,7 @@ pub const Stat = switch (native_os) {
 
 pub const pthread_spinlock_t = switch (native_os) {
     .openbsd => openbsd.pthread_spinlock_t,
-    .freebsd => extern struct {
+    .freebsd, .dragonfly => extern struct {
         inner: ?*anyopaque = null,
     },
     .netbsd => extern struct {
