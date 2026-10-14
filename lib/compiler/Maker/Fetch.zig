@@ -302,7 +302,7 @@ pub const JobQueue = struct {
                     \\        pub const deps: []const struct { []const u8, []const u8 } = &.{
                     \\
                 );
-                for (manifest.dependencies.keys(), manifest.dependencies.values()) |name, dep| {
+                for (manifest.dependencies.keys(), manifest.dependencies.values()) |name, *dep| {
                     const h = depDigest(fetch.package_root, jq.global_cache, dep) orelse continue;
                     try w.print(
                         "            .{{ \"{f}\", \"{f}\" }},\n",
@@ -335,7 +335,7 @@ pub const JobQueue = struct {
         assert(root_fetch.have_manifest);
         const root_manifest = &root_fetch.manifest;
 
-        for (root_manifest.dependencies.keys(), root_manifest.dependencies.values()) |name, dep| {
+        for (root_manifest.dependencies.keys(), root_manifest.dependencies.values()) |name, *dep| {
             const h = depDigest(root_fetch.package_root, jq.global_cache, dep) orelse continue;
             try w.print(
                 "    .{{ \"{f}\", \"{f}\" }},\n",
@@ -2033,7 +2033,7 @@ const Filter = struct {
     }
 };
 
-pub fn depDigest(pkg_root: Path, cache_root: Directory, dep: Manifest.Dependency) ?Package.Hash {
+pub fn depDigest(pkg_root: Path, cache_root: Directory, dep: *const Manifest.Dependency) ?Package.Hash {
     if (dep.hash) |h| return .fromSlice(h);
 
     switch (dep.location) {
