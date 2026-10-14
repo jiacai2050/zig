@@ -8190,7 +8190,7 @@ pub const pthread_attr_t = switch (native_os) {
         __opaque: [56]u8,
     },
     // https://github.com/SerenityOS/serenity/blob/b98f537f117b341788023ab82e0c11ca9ae29a57/Kernel/API/POSIX/sys/types.h#L75
-    .freebsd, .openbsd, .serenity => extern struct {
+    .freebsd, .haiku, .openbsd, .serenity => extern struct {
         inner: ?*anyopaque = null,
     },
     .illumos => extern struct {
@@ -8200,13 +8200,6 @@ pub const pthread_attr_t = switch (native_os) {
         magic: u32,
         flags: i32,
         private: ?*anyopaque,
-    },
-    .haiku => extern struct {
-        detach_state: i32,
-        sched_priority: i32,
-        stack_size: i32,
-        guard_size: i32,
-        stack_address: ?*anyopaque,
     },
     else => void,
 };
