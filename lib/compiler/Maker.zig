@@ -1398,7 +1398,7 @@ fn configure(graph: *Graph, options: ConfigureOptions) !ScannedConfig {
                     process.exit(0);
                 }
 
-                try validateFingerprints(gpa, &job_queue);
+                try validateFingerprints(gpa, &job_queue, &fork_set);
 
                 // Create the dependencies.zig file for configurer to
                 // obtain via `@import("@dependencies")`.
@@ -1749,7 +1749,11 @@ const ValidFingerprintTable = std.array_hash_map.Custom(
 
 /// Ensure that the dependency tree did not have any fingerprint matches with the same semantic version but
 /// differing package hashes.
-fn validateFingerprints(gpa: Allocator, job_queue: *const Fetch.JobQueue) !void {
+fn validateFingerprints(
+    gpa: Allocator,
+    job_queue: *const Fetch.JobQueue,
+    fork_set: *const Package.Fetch.JobQueue.ForkSet,
+) !void {
     var any_errors = false;
 
     var table: ValidFingerprintTable = .empty;
@@ -1757,8 +1761,13 @@ fn validateFingerprints(gpa: Allocator, job_queue: *const Fetch.JobQueue) !void 
 
     for (job_queue.table.keys(), job_queue.table.values()) |pkg_hash, fetch| {
         if (!fetch.have_manifest) continue;
+
+        // Forked packages are exempt since they overide multiple package hashes to have the forked contents.
+        const project_id: Package.ProjectId = .init(fetch.manifest.name, fetch.manifest.id);
+        if (fork_set.containsAdapted(project_id, @as(Fetch.JobQueue.Fork.Adapter, .{}))) continue;
+
         const gop = try table.getOrPut(gpa, .{
-            .project_id = .init(fetch.manifest.name, fetch.manifest.id),
+            .project_id = project_id,
             .version = fetch.manifest.version,
         });
         if (gop.found_existing) {
