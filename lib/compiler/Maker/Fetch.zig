@@ -595,7 +595,7 @@ pub fn run(f: *Fetch) RunError!void {
     if (remote.hash) |expected_hash| {
         const expected_project_id: Package.ProjectId = expected_hash.projectId();
         if (job_queue.fork_set.getKeyPtrAdapted(expected_project_id, @as(JobQueue.Fork.Adapter, .{}))) |fork| {
-            log.debug("using fork {f} for {s}", .{ fork.path, fork.manifest.name });
+            log.debug("using fork {f} for {s}", .{ fork.path, expected_hash.toSlice() });
             fork.uses += 1;
             f.package_root = fork.path;
             f.remote_package_root = f.package_root;
