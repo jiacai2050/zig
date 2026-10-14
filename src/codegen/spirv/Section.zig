@@ -31,7 +31,7 @@ pub fn fromWords(gpa: Allocator, words: []const Word, id_bound: Word) Error!Sect
     const type_widths = try gpa.alloc(u16, id_bound);
     defer gpa.free(type_widths);
     @memset(type_widths, 0);
-    var instruction_sets: std.array_hash_map.Auto(Word, spec.InstructionSet) = .empty;
+    var instruction_sets: std.array_hash_map.Auto(Word, ?spec.InstructionSet) = .empty;
     defer instruction_sets.deinit(gpa);
     var results: std.bit_set.Dynamic = try .initEmpty(gpa, id_bound);
     defer results.deinit(gpa);
@@ -48,18 +48,18 @@ pub fn fromWords(gpa: Allocator, words: []const Word, id_bound: Word) Error!Sect
             return error.UnknownOpcode;
         const end = offset + len;
         var index = offset + 1;
-        const list: []const spec.Operand = switch (op) {
-            .OpFunction => list: {
+        const list: []const spec.Operand = list: switch (op) {
+            .OpFunction => {
                 if (in_function) return error.NestedFunction;
                 in_function = true;
                 break :list op.operands();
             },
-            .OpFunctionEnd => list: {
+            .OpFunctionEnd => {
                 if (!in_function) return error.InvalidInstruction;
                 in_function = false;
                 break :list op.operands();
             },
-            .OpSpecConstantOp => list: {
+            .OpSpecConstantOp => {
                 const prefix = op.operands()[0..2];
                 index = try section.parseOperands(type_widths, offset, end, prefix, index);
                 if (index >= end) return error.InvalidInstruction;
@@ -68,9 +68,14 @@ pub fn fromWords(gpa: Allocator, words: []const Word, id_bound: Word) Error!Sect
                 index += 1;
                 break :list inner.operands()[2..];
             },
-            .OpExtInst => list: {
+            .OpExtInst => {
                 if (len < 5) return error.InvalidInstruction;
-                const set = instruction_sets.get(inst[3]) orelse return error.InvalidInstruction;
+                const maybe_set = instruction_sets.get(inst[3]) orelse return error.InvalidInstruction;
+                const set = maybe_set orelse {
+                    const prefix = op.operands()[0..4];
+                    index = try section.parseOperands(type_widths, offset, end, prefix, index);
+                    break :list &.{.{ .kind = .id_ref, .quantifier = .variadic }};
+                };
                 const prefix = op.operands()[0..4];
                 index = try section.parseOperands(type_widths, offset, end, prefix, index);
                 break :list set.operands(inst[4]) orelse return error.InvalidInstruction;
@@ -93,6 +98,8 @@ pub fn fromWords(gpa: Allocator, words: []const Word, id_bound: Word) Error!Sect
                 const set_name = std.mem.sliceTo(std.mem.sliceAsBytes(inst[2..]), 0);
                 if (std.meta.stringToEnum(spec.InstructionSet, set_name)) |set| {
                     if (set != .core) try instruction_sets.put(gpa, inst[1], set);
+                } else if (std.mem.startsWith(u8, set_name, "NonSemantic.")) {
+                    try instruction_sets.put(gpa, inst[1], null);
                 }
             },
             else => if (op.resultIndex() == 2) {
