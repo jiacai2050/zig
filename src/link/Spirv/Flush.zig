@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Path = std.Build.Cache.Path;
 const assert = std.debug.assert;
+const stringToEnum = std.meta.stringToEnum;
 const InternPool = @import("../../InternPool.zig");
 const link = @import("../../link.zig");
 const Type = @import("../../Type.zig");
@@ -34,6 +35,7 @@ decorations: Section,
 globals: Section,
 declarations: Section,
 functions: Section,
+nonsemantic_info: bool = false,
 
 const Symbol = struct {
     id: Id,
@@ -42,7 +44,7 @@ const Symbol = struct {
 };
 
 const Annotation = struct {
-    target: Word,
+    target_id: Word,
     class: spec.Class,
     start: usize,
     end: usize,
@@ -224,6 +226,7 @@ fn load(flush: *Flush, mir: *const Mir, path: ?Path) link.Error!void {
     const gpa = comp.gpa;
     const arena = flush.arena;
     const diags = &comp.link_diags;
+    const target = &comp.root_mod.resolved_target.result;
 
     const ids = try gpa.alloc(Id, mir.id_bound);
     defer gpa.free(ids);
@@ -264,7 +267,7 @@ fn load(flush: *Flush, mir: *const Mir, path: ?Path) link.Error!void {
         offset += inst.len;
 
         if (header.opcode == .OpDecorate) {
-            const target = inst[1];
+            const target_id = inst[1];
             const decoration: spec.Decoration = @fromBackingInt(inst[2]);
             if (decoration == .linkage_attributes) {
                 const parameters = inst[3..];
@@ -273,7 +276,7 @@ fn load(flush: *Flush, mir: *const Mir, path: ?Path) link.Error!void {
                 const linkage: spec.LinkageType = @fromBackingInt(parameters[parameters.len - 1]);
                 const gop = try flush.symbols.getOrPut(arena, name);
                 if (!gop.found_existing) gop.value_ptr.* = .{
-                    .id = ids[target],
+                    .id = ids[target_id],
                     .defined = false,
                     .declaration = &.{},
                 };
@@ -285,19 +288,19 @@ fn load(flush: *Flush, mir: *const Mir, path: ?Path) link.Error!void {
                         }
                         gop.value_ptr.defined = true;
                     },
-                    .import => try imports.put(gpa, target, @intCast(gop.index)),
+                    .import => try imports.put(gpa, target_id, @intCast(gop.index)),
                     .link_once_odr => {
                         return diags.failParse(path.?, "unsupported linkage '{t}'", .{linkage});
                     },
                 }
 
-                ids[target] = gop.value_ptr.id;
+                ids[target_id] = gop.value_ptr.id;
                 continue;
             }
         }
 
         const class = header.opcode.class();
-        const target: Word = switch (header.opcode) {
+        const target_id: Word = switch (header.opcode) {
             .OpName, .OpMemberName => inst[1],
             .OpDecorationGroup, .OpGroupDecorate, .OpGroupMemberDecorate => {
                 return diags.failParse(path.?, "decoration groups are not supported", .{});
@@ -305,31 +308,33 @@ fn load(flush: *Flush, mir: *const Mir, path: ?Path) link.Error!void {
             else => if (class == .annotation) inst[1] else continue,
         };
         try annotations.append(gpa, .{
-            .target = target,
+            .target_id = target_id,
             .class = class,
             .start = start,
             .end = offset,
         });
     }
 
+    var result_ids: std.ArrayList(Word) = .empty;
+    defer result_ids.deinit(gpa);
+
     const starts = try gpa.alloc(u32, mir.id_bound + 1);
     defer gpa.free(starts);
     @memset(starts, 0);
 
-    for (annotations.items) |annotation| starts[annotation.target + 1] += 1;
+    for (annotations.items) |annotation| starts[annotation.target_id + 1] += 1;
     for (1..starts.len) |i| starts[i] += starts[i - 1];
 
-    const cursors = try gpa.dupe(u32, starts);
-    defer gpa.free(cursors);
-    const by_target = try gpa.alloc(u32, annotations.items.len);
-    defer gpa.free(by_target);
-    for (annotations.items, 0..) |annotation, i| {
-        by_target[cursors[annotation.target]] = @intCast(i);
-        cursors[annotation.target] += 1;
+    const grouped_indices = try gpa.alloc(u32, annotations.items.len);
+    defer gpa.free(grouped_indices);
+    {
+        const next_slot = try gpa.dupe(u32, starts);
+        defer gpa.free(next_slot);
+        for (annotations.items, 0..) |annotation, i| {
+            grouped_indices[next_slot[annotation.target_id]] = @intCast(i);
+            next_slot[annotation.target_id] += 1;
+        }
     }
-
-    var results: std.ArrayList(Word) = .empty;
-    defer results.deinit(gpa);
 
     offset = 0;
     while (offset < words.len) {
@@ -340,25 +345,67 @@ fn load(flush: *Flush, mir: *const Mir, path: ?Path) link.Error!void {
         input.mark += 1;
         flush.deps.clearRetainingCapacity();
 
-        const result_index = header.opcode.resultIndex() orelse {
-            switch (header.opcode) {
-                .OpEntryPoint => {
-                    try input.copy(flush, &flush.object_entry_points, start, offset, null);
-                },
-                .OpExecutionMode, .OpExecutionModeId => {
-                    try input.copy(flush, &flush.object_execution_modes, start, offset, null);
-                },
-                .OpTypeForwardPointer => {
-                    forward_pointers.set(inst[1]);
-                    try input.copy(flush, &flush.globals, start, offset, null);
-                },
-                else => {},
-            }
-            continue;
+        const result_index = header.opcode.resultIndex() orelse switch (header.opcode) {
+            .OpCapability => {
+                const capability = std.enums.fromInt(spec.Capability, inst[1]) orelse {
+                    return diags.failParse(path.?, "unknown capability '{d}'", .{inst[1]});
+                };
+
+                // TODO: this isn't a full validation. we probably have to automate this
+                // based on some generated info from SPIRV-Headers/SPIRV-Registry
+                const allowed = switch (capability) {
+                    .linkage => true,
+                    .shader => target.os.tag == .vulkan or target.os.tag == .opengl,
+                    .kernel, .addresses => target.os.tag == .opencl,
+                    .physical_storage_buffer_addresses => target.os.tag == .vulkan and target.cpu.arch == .spirv64,
+                    else => if (stringToEnum(std.Target.spirv.Feature, @tagName(capability))) |f| target.cpu.has(.spirv, f) else false,
+                };
+                if (!allowed) return diags.failParse(
+                    path.?,
+                    "SPIR-V capability '{t}' is not enabled by the target feature set",
+                    .{capability},
+                );
+                continue;
+            },
+            .OpExtension => {
+                const name = std.mem.sliceTo(std.mem.sliceAsBytes(inst[1..]), 0);
+                if (std.mem.eql(u8, name, "SPV_KHR_non_semantic_info")) {
+                    flush.nonsemantic_info = true;
+                    continue;
+                }
+
+                const allowed = allowed: {
+                    if (stringToEnum(std.Target.spirv.Feature, name)) |f| {
+                        break :allowed target.cpu.has(.spirv, f);
+                    }
+                    break :allowed true;
+                };
+                if (!allowed) return diags.failParse(
+                    path.?,
+                    "SPIR-V extension '{s}' is not enabled by the target feature set",
+                    .{name},
+                );
+                continue;
+            },
+            .OpEntryPoint => {
+                try input.copy(flush, &flush.object_entry_points, start, offset, null);
+                continue;
+            },
+            .OpExecutionMode, .OpExecutionModeId => {
+                try input.copy(flush, &flush.object_execution_modes, start, offset, null);
+                continue;
+            },
+            .OpTypeForwardPointer => {
+                forward_pointers.set(inst[1]);
+                try input.copy(flush, &flush.globals, start, offset, null);
+                continue;
+            },
+            else => continue,
         };
-        const result = inst[result_index];
-        results.clearRetainingCapacity();
-        try results.append(gpa, result);
+
+        const result_id = inst[result_index];
+        result_ids.clearRetainingCapacity();
+        try result_ids.append(gpa, result_id);
 
         var has_body = false;
         if (header.opcode == .OpFunction) {
@@ -366,16 +413,16 @@ fn load(flush: *Flush, mir: *const Mir, path: ?Path) link.Error!void {
                 const body: spec.InstructionHeader = @bitCast(words[offset]);
                 if (body.opcode == .OpLabel) has_body = true;
                 if (body.opcode.resultIndex()) |index| {
-                    try results.append(gpa, words[offset + index]);
+                    try result_ids.append(gpa, words[offset + index]);
                 }
                 offset += body.word_count;
                 if (body.opcode == .OpFunctionEnd) break;
             }
         }
 
-        for (results.items) |own| input.marks[own] = input.mark;
+        for (result_ids.items) |own| input.marks[own] = input.mark;
 
-        if (imports.get(result)) |symbol_index| {
+        if (imports.get(result_id)) |symbol_index| {
             flush.scratch.reset();
             try input.copy(flush, &flush.scratch, start, offset, null);
             const declaration = try arena.dupe(Word, flush.scratch.instructions.items);
@@ -385,30 +432,30 @@ fn load(flush: *Flush, mir: *const Mir, path: ?Path) link.Error!void {
 
         switch (header.opcode) {
             .OpFunction => if (!has_body) return diags.failParse(path.?, "function declaration without linkage", .{}),
-            .OpVariable => try flush.variables.put(arena, ids[result], @fromBackingInt(inst[3])),
-            else => if (!forward_pointers.isSet(result)) {
+            .OpVariable => try flush.variables.put(arena, ids[result_id], @fromBackingInt(inst[3])),
+            else => if (!forward_pointers.isSet(result_id)) {
                 flush.scratch.reset();
                 try input.copy(flush, &flush.scratch, start, offset, start + result_index);
-                for (by_target[starts[result]..starts[result + 1]]) |index| {
+                for (grouped_indices[starts[result_id]..starts[result_id + 1]]) |index| {
                     const annotation = annotations.items[index];
                     if (annotation.class != .annotation) continue;
-                    const target = annotation.start + 1;
-                    try input.copy(flush, &flush.scratch, annotation.start, annotation.end, target);
+                    const target_id = annotation.start + 1;
+                    try input.copy(flush, &flush.scratch, annotation.start, annotation.end, target_id);
                 }
 
                 const key = std.mem.sliceAsBytes(flush.scratch.instructions.items);
                 const gop = try flush.interned.getOrPut(arena, key);
                 if (gop.found_existing) {
-                    ids[result] = gop.value_ptr.*;
+                    ids[result_id] = gop.value_ptr.*;
                     continue;
                 }
                 gop.key_ptr.* = try arena.dupe(u8, key);
-                gop.value_ptr.* = ids[result];
+                gop.value_ptr.* = ids[result_id];
             },
         }
 
-        for (results.items) |target| {
-            for (by_target[starts[target]..starts[target + 1]]) |index| {
+        for (result_ids.items) |target_id| {
+            for (grouped_indices[starts[target_id]..starts[target_id + 1]]) |index| {
                 const annotation = annotations.items[index];
                 const section = switch (annotation.class) {
                     .debug => &flush.names,
@@ -428,7 +475,7 @@ fn load(flush: *Flush, mir: *const Mir, path: ?Path) link.Error!void {
         try input.copy(flush, section, start, offset, null);
         if (header.opcode == .OpFunction) {
             const references = try arena.dupe(Id, flush.deps.items);
-            try flush.function_references.put(arena, ids[result], references);
+            try flush.function_references.put(arena, ids[result_id], references);
         }
     }
 
@@ -468,25 +515,25 @@ fn emitCapabilities(flush: *Flush, out: *Section) link.Error!void {
         try out.emit(gpa, .OpCapability, .{ .capability = .linkage });
     }
 
-    inline for (@typeInfo(spec.Capability).@"enum".field_names) |name| {
-        if (@hasField(std.Target.spirv.Feature, name)) {
-            const feature = @field(std.Target.spirv.Feature, name);
-            if (target.cpu.has(.spirv, feature)) {
-                try out.emit(gpa, .OpCapability, .{ .capability = @field(spec.Capability, name) });
-            }
-        }
+    for (std.enums.values(spec.Capability)) |capability| {
+        const feature = stringToEnum(std.Target.spirv.Feature, @tagName(capability)) orelse continue;
+        if (!target.cpu.has(.spirv, feature)) continue;
+        try out.emit(gpa, .OpCapability, .{ .capability = capability });
     }
 
     if (target.cpu.arch == .spirv64 and target.os.tag == .vulkan) {
         try out.emit(gpa, .OpExtension, .{ .name = "SPV_KHR_physical_storage_buffer" });
     }
 
-    inline for (@typeInfo(spec.Extension).@"enum".field_names) |name| {
-        if (comptime std.mem.startsWith(u8, name, "v1_")) continue;
-        if (@hasField(std.Target.spirv.Feature, name)) {
-            const feature = @field(std.Target.spirv.Feature, name);
-            if (target.cpu.has(.spirv, feature)) try out.emit(gpa, .OpExtension, .{ .name = name });
-        }
+    for (std.enums.values(spec.Extension)) |extension| {
+        const name = @tagName(extension);
+        if (std.mem.startsWith(u8, name, "v1_")) continue;
+        const feature = stringToEnum(std.Target.spirv.Feature, name) orelse continue;
+        if (!target.cpu.has(.spirv, feature)) continue;
+        try out.emit(gpa, .OpExtension, .{ .name = name });
+    }
+    if (flush.nonsemantic_info) {
+        try out.emit(gpa, .OpExtension, .{ .name = "SPV_KHR_non_semantic_info" });
     }
 }
 

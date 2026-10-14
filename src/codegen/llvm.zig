@@ -455,6 +455,7 @@ pub const Object = struct {
 
                 switch (comp.config.debug_format) {
                     .strip => unreachable,
+                    .nsdi => {},
                     .dwarf => |f| {
                         module_flags.appendAssumeCapacity(try o.builder.metadataTuple(&.{
                             behavior_max,

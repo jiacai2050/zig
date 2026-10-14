@@ -1300,7 +1300,7 @@ pub const cache_helpers = struct {
         const tag: @typeInfo(Config.DebugFormat).@"union".tag_type.? = x;
         hh.add(tag);
         switch (x) {
-            .strip, .code_view => {},
+            .strip, .code_view, .nsdi => {},
             .dwarf => |f| hh.add(f),
         }
     }
@@ -6303,6 +6303,7 @@ fn addCommonCCArgs(
     try argv.ensureUnusedCapacity(2);
     switch (comp.config.debug_format) {
         .strip => {},
+        .nsdi => argv.appendAssumeCapacity("-g"),
         .code_view => {
             // -g is required here because -gcodeview doesn't trigger debug info
             // generation, it only changes the type of information generated.
