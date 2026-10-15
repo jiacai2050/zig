@@ -4332,6 +4332,10 @@ const posix_msghdr_const = extern struct {
 };
 
 pub const mmsghdr = switch (native_os) {
+    .freebsd => extern struct {
+        hdr: msghdr,
+        len: isize,
+    },
     .linux => linux.mmsghdr,
     else => extern struct {
         hdr: msghdr,
