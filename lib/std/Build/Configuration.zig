@@ -227,6 +227,27 @@ pub const Wip = struct {
         return @fromBackingInt(@intCast(revert_index));
     }
 
+    pub fn addStringListInterned(wip: *Wip, list: []const String) Allocator.Error!StringList {
+        // Increase size of extra to support the list. Add the string list
+        // there. Then check for duplicate, reverting list if already found.
+        const gpa = wip.gpa;
+        const revert_index: u32 = @intCast(wip.extra.items.len);
+        const added = try wip.extra.addManyAsSlice(gpa, list.len + 1);
+        added[0] = @intCast(list.len);
+        @memcpy(added[1..], @as([]const u32, @ptrCast(list)));
+        const gop = try wip.dedupe_table.getOrPutContext(gpa, .{
+            .index = revert_index,
+            .len = @intCast(added.len),
+        }, @as(ExtraSlice.Context, .{ .extra = wip.extra.items }));
+
+        if (gop.found_existing) {
+            wip.extra.items.len = revert_index;
+            return @fromBackingInt(@intCast(gop.key_ptr.index));
+        }
+
+        return @fromBackingInt(@intCast(revert_index));
+    }
+
     pub fn addBytes(wip: *Wip, bytes: []const u8) Allocator.Error!Bytes {
         try wip.string_bytes.appendSlice(wip.gpa, bytes);
         return .{
@@ -479,6 +500,7 @@ pub const Step = extern struct {
     owner: Package.Index,
     deps: Deps.Index,
     max_rss: MaxRss,
+    unlazy_deps: OptionalStringList,
     extended: Storage.Extended(Flags, union(Tag) {
         check_file: CheckFile,
         compile: Compile,
