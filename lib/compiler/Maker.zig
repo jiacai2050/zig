@@ -915,13 +915,19 @@ pub fn main(init: process.Init.Minimal) !void {
 
                                 maker.watch = body.flags.watch;
                                 maker.prepare(steps, &configure_source_files) catch |err| switch (err) {
-                                    error.DependencyLoopDetected, error.InsufficientMemory => {
-                                        // TODO handle DependencyLoopDetected as error.FailedButCacheIntact
-                                        // and handle InsufficientMemory as error.AlreadyReported
+                                    error.DependencyLoopDetected => {
+                                        // TODO handle error.FailedButCacheIntact
                                         _ = io.lockStderr(&.{}, graph.stderr_mode) catch {};
                                         process.exit(1);
                                     },
                                     else => |e| return e,
+                                };
+                                maker.checkSufficientMemory() catch |err| switch (err) {
+                                    error.InsufficientMemory => {
+                                        // TODO handle as error.AlreadyReported
+                                        _ = io.lockStderr(&.{}, graph.stderr_mode) catch {};
+                                        process.exit(1);
+                                    },
                                 };
 
                                 try maker.makeSteps(main_progress_node, null);
@@ -980,13 +986,19 @@ pub fn main(init: process.Init.Minimal) !void {
             defer gpa.free(initial_steps);
 
             maker.prepare(initial_steps, &configure_source_files) catch |err| switch (err) {
-                error.DependencyLoopDetected, error.InsufficientMemory => {
-                    // TODO handle DependencyLoopDetected as error.FailedButCacheIntact
-                    // and handle InsufficientMemory as error.AlreadyReported
+                error.DependencyLoopDetected => {
+                    // TODO handle as error.FailedButCacheIntact
                     _ = io.lockStderr(&.{}, graph.stderr_mode) catch {};
                     process.exit(1);
                 },
                 else => |e| return e,
+            };
+            maker.checkSufficientMemory() catch |err| switch (err) {
+                error.InsufficientMemory => {
+                    // TODO handle as error.AlreadyReported
+                    _ = io.lockStderr(&.{}, graph.stderr_mode) catch {};
+                    process.exit(1);
+                },
             };
 
             var w: Watch = w: {
@@ -2695,41 +2707,44 @@ fn prepare(
     for (starting_steps) |s| {
         try constructGraphAndCheckForDependencyLoop(maker, s, &maker.step_stack, rand);
     }
+}
 
-    {
-        // Check that we have enough memory to complete the build.
-        var any_problems = false;
-        var max_needed: u64 = 0;
-        for (step_stack.keys()) |step_index| {
-            const make_step = maker.stepByIndex(step_index);
-            const conf_step = step_index.ptr(c);
-            const max_rss = conf_step.max_rss.toBytes();
-            if (max_rss == 0) continue;
-            max_needed = @max(max_needed, max_rss);
-            if (max_rss > maker.available_rss) {
-                if (maker.skip_oom_steps) {
-                    make_step.state = .skipped_oom;
-                    for (make_step.dependants.items) |dependant| {
-                        maker.stepByIndex(dependant).pending_deps -= 1;
-                    }
-                } else {
-                    log.err("{s}{s}: this step declares an upper bound of {d} bytes of memory, exceeding the available {d} bytes of memory", .{
-                        conf_step.owner.depPrefixSlice(c),
-                        conf_step.name.slice(c),
-                        max_rss,
-                        maker.available_rss,
-                    });
-                    any_problems = true;
+fn checkSufficientMemory(maker: *Maker) error{InsufficientMemory}!void {
+    const step_stack = &maker.step_stack;
+    const c = &maker.scanned_config.configuration;
+
+    // Check that we have enough memory to complete the build.
+    var any_problems = false;
+    var max_needed: u64 = 0;
+    for (step_stack.keys()) |step_index| {
+        const make_step = maker.stepByIndex(step_index);
+        const conf_step = step_index.ptr(c);
+        const max_rss = conf_step.max_rss.toBytes();
+        if (max_rss == 0) continue;
+        max_needed = @max(max_needed, max_rss);
+        if (max_rss > maker.available_rss) {
+            if (maker.skip_oom_steps) {
+                make_step.state = .skipped_oom;
+                for (make_step.dependants.items) |dependant| {
+                    maker.stepByIndex(dependant).pending_deps -= 1;
                 }
+            } else {
+                log.err("{s}{s}: this step declares an upper bound of {d} bytes of memory, exceeding the available {d} bytes of memory", .{
+                    conf_step.owner.depPrefixSlice(c),
+                    conf_step.name.slice(c),
+                    max_rss,
+                    maker.available_rss,
+                });
+                any_problems = true;
             }
         }
-        if (any_problems) {
-            log.info("use --skip-oom-steps to proceed, skipping memory limited steps", .{});
-            if (maker.max_rss_is_default) {
-                log.info("use --maxrss {d} to proceed, risking system memory exhaustion", .{max_needed});
-            }
-            return error.InsufficientMemory;
+    }
+    if (any_problems) {
+        log.info("use --skip-oom-steps to proceed, skipping memory limited steps", .{});
+        if (maker.max_rss_is_default) {
+            log.info("use --maxrss {d} to proceed, risking system memory exhaustion", .{max_needed});
         }
+        return error.InsufficientMemory;
     }
 }
 
