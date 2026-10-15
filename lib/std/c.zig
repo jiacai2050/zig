@@ -8196,7 +8196,7 @@ pub const pthread_rwlock_t = switch (native_os) {
 };
 
 pub const pthread_attr_t = switch (native_os) {
-    .linux, .emscripten, .dragonfly => extern struct {
+    .linux, .emscripten => extern struct {
         __size: [56]u8,
         __align: c_long,
     },
@@ -8205,7 +8205,7 @@ pub const pthread_attr_t = switch (native_os) {
         __opaque: [56]u8,
     },
     // https://github.com/SerenityOS/serenity/blob/b98f537f117b341788023ab82e0c11ca9ae29a57/Kernel/API/POSIX/sys/types.h#L75
-    .freebsd, .haiku, .openbsd, .serenity => extern struct {
+    .dragonfly, .freebsd, .haiku, .openbsd, .serenity => extern struct {
         inner: ?*anyopaque = null,
     },
     .illumos => extern struct {
