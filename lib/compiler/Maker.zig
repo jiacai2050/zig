@@ -1608,16 +1608,24 @@ fn configure(graph: *Graph, options: ConfigureOptions) !ScannedConfig {
 
         if (configuration.unlazy_deps.len != 0) {
             var any_errors = false;
-            for (configuration.unlazy_deps) |hash_string| {
-                const hash = hash_string.slice(&configuration);
-                assert(hash.len != 0);
-                if (hash.len > Package.Hash.max_len) {
-                    log.err("invalid digest (length {d} exceeds maximum): {q}", .{ hash.len, hash });
+            for (configuration.unlazy_deps) |unlazy_dep| {
+                if (unlazy_dep.step.unwrap()) |step_index| {
+                    log.err("TODO implement step-associated lazy dependencies in maker", .{});
                     any_errors = true;
-                    continue;
+                    _ = step_index;
+                } else {
+                    for (unlazy_dep.list.slice(&configuration)) |hash_string| {
+                        const hash = hash_string.slice(&configuration);
+                        assert(hash.len != 0);
+                        if (hash.len > Package.Hash.max_len) {
+                            log.err("invalid digest (length {d} exceeds maximum): {q}", .{ hash.len, hash });
+                            any_errors = true;
+                            continue;
+                        }
+                        log.info("fetching lazy dependency {s}", .{hash});
+                        try unlazy_set.put(arena, .fromSlice(hash), {});
+                    }
                 }
-                log.info("fetching lazy dependency {s}", .{hash});
-                try unlazy_set.put(arena, .fromSlice(hash), {});
             }
             if (any_errors) return error.FailedButCacheIntact;
             if (options.system_pkg_dir_path) |p| {

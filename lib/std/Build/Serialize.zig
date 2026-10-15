@@ -681,22 +681,23 @@ pub fn write(b: *std.Build, wc: *Configuration.Wip, writer: *std.Io.Writer) !voi
                 .owner = try s.builderToPackage(step.owner),
                 .deps = deps,
                 .max_rss = .fromBytes(step.max_rss),
-                .unlazy_deps = if (step.unlazy_deps.count() != 0)
-                    .init(try wc.addStringListInterned(step.unlazy_deps.keys()))
-                else
-                    .none,
                 .extended = @fromBackingInt(extended),
             });
+
+            if (step.unlazy_deps.count() != 0) {
+                try wc.unlazy_deps.append(gpa, .{
+                    .step = @fromBackingInt(@intCast(wc.steps.items.len - 1)),
+                    .list = try wc.addStringListInterned(step.unlazy_deps.keys()),
+                });
+            }
         }
     }
 
-    {
-        // TODO exchange graph.unlazy_deps.keys with the wc.unlazy_deps array list without copying
-        // MultiArrayList should support this when there is only 1 non zero sized struct field
-        const unlazy_deps = graph.unlazy_deps.keys();
-        try wc.unlazy_deps.ensureTotalCapacityPrecise(gpa, unlazy_deps.len);
-        assert(wc.unlazy_deps.items.len == 0);
-        wc.unlazy_deps.appendSliceAssumeCapacity(unlazy_deps);
+    if (graph.unlazy_deps.count() != 0) {
+        try wc.unlazy_deps.append(gpa, .{
+            .step = .none,
+            .list = try wc.addStringListInterned(graph.unlazy_deps.keys()),
+        });
     }
 
     try wc.write(writer, .{
