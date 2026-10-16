@@ -7075,7 +7075,7 @@ pub const CallAbiIterator = struct {
                     .signedness = .unsigned,
                     .bits = zcu.errorSetBits(),
                 } },
-                .f16, .f32, .f64 => {
+                .f16, .f32, .f64, .c_longdouble => {
                     const bits = ty.floatBits(isel.target);
                     if (isel.canUseFprForFloat(bits)) {
                         if (it.allocReg(.fpr)) |reg| {
@@ -7090,7 +7090,6 @@ pub const CallAbiIterator = struct {
                         continue :type_key .{ .int_type = .{ .signedness = .unsigned, .bits = bits } };
                     }
                 },
-                .c_longdouble => return isel.fail("CallAbiIterator.resolve({t})", .{simple_type}),
                 else => return isel.fail("CallAbiIterator.resolve({t})", .{simple_type}),
             },
             .struct_type => {
