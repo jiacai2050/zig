@@ -1363,9 +1363,12 @@ fn addGlobalSymbol(macho: *MachO, opts: struct {
     symbol.nlist(macho).* = .{
         .n_strx = @backingInt(strx),
         .n_type = .{ .bits = .{
-            .ext = switch (opts.visibility) {
-                .default => true,
-                .hidden => false,
+            .ext = switch (macho.machFiletype()) {
+                .OBJECT => true,
+                .EXECUTE, .DYLIB => switch (opts.visibility) {
+                    .default => true,
+                    .hidden => false,
+                },
             },
             .pext = switch (opts.visibility) {
                 .default => false,
