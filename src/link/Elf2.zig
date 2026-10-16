@@ -8002,8 +8002,8 @@ fn loadObject(
                                 .progbits => |isi| isi.node(elf),
                                 .nobits => return diags.failParse(
                                     path,
-                                    "relocations applying to BSS (SHT_NOBITS) sections are unsupported",
-                                    .{},
+                                    "cannot apply relocation to SHT_NOBITS section '{s}'",
+                                    .{std.mem.sliceTo(shstrtab[loc_sec.shdr.name..], 0)},
                                 ),
                             };
 
