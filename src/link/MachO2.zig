@@ -422,7 +422,7 @@ const Reloc = struct {
         ///
         /// This function does not perform length checks on `dest_overlong`; the caller guarantees
         /// that it will be at least long enough to support this relocation type.
-        fn validateInst(t: Type, macho: *const MachO, dest_overlong: []const u8) bool {
+        fn validateInst(t: Type, dest_overlong: []const u8) bool {
             switch (t) {
                 .abs8,
                 .abs16,
@@ -432,8 +432,8 @@ const Reloc = struct {
                 => return true,
 
                 .arm64_branchrel26 => {
-                    const inst: *align(1) const aarch64.encoding.Instruction = @ptrCast(dest_overlong[0..4]);
-                    return switch (macho.targetLoad(inst).decode()) {
+                    const inst: aarch64.encoding.Instruction = .read(dest_overlong[0..4]);
+                    return switch (inst.decode()) {
                         .branch_exception_generating_system => |begs| switch (begs.decode()) {
                             .unconditional_branch_immediate => true,
                             else => false,
@@ -442,8 +442,8 @@ const Reloc = struct {
                     };
                 },
                 .arm64_pagerel21 => {
-                    const inst: *align(1) const aarch64.encoding.Instruction = @ptrCast(dest_overlong[0..4]);
-                    return switch (macho.targetLoad(inst).decode()) {
+                    const inst: aarch64.encoding.Instruction = .read(dest_overlong[0..4]);
+                    return switch (inst.decode()) {
                         .data_processing_immediate => |dpi| switch (dpi.decode()) {
                             .pc_relative_addressing => |pra| switch (pra.decode()) {
                                 .adrp => true,
@@ -455,8 +455,8 @@ const Reloc = struct {
                     };
                 },
                 .arm64_pageoff12 => {
-                    const inst: *align(1) const aarch64.encoding.Instruction = @ptrCast(dest_overlong[0..4]);
-                    return switch (macho.targetLoad(inst).decode()) {
+                    const inst: aarch64.encoding.Instruction = .read(dest_overlong[0..4]);
+                    return switch (inst.decode()) {
                         .data_processing_immediate => |dpi| switch (dpi.decode()) {
                             .add_subtract_immediate => true,
                             else => false,
@@ -602,10 +602,9 @@ const Reloc = struct {
                 }
                 const casted = std.math.cast(i26, shifted) orelse return error.RelocationOverflow;
 
-                const inst: *align(1) aarch64.encoding.Instruction = @ptrCast(dest_slice[0..4]);
-                var x = macho.targetLoad(inst);
-                x.branch_exception_generating_system.unconditional_branch_immediate.group.imm26 = casted;
-                macho.targetStore(inst, x);
+                var inst: aarch64.encoding.Instruction = .read(dest_slice[0..4]);
+                inst.branch_exception_generating_system.unconditional_branch_immediate.group.imm26 = casted;
+                inst.write(dest_slice[0..4]);
             },
             .arm64_pagerel21 => {
                 const cur_page: u53 = @intCast(dest_vaddr >> 12);
@@ -615,25 +614,21 @@ const Reloc = struct {
                     std.math.cast(i21, page_off) orelse return error.RelocationOverflow,
                 );
 
-                const inst: *align(1) aarch64.encoding.Instruction = @ptrCast(dest_slice[0..4]);
-                var x = macho.targetLoad(inst);
-                x.data_processing_immediate.pc_relative_addressing.adrp.immhi = split.hi;
-                x.data_processing_immediate.pc_relative_addressing.adrp.immlo = split.lo;
-                macho.targetStore(inst, x);
+                var inst: aarch64.encoding.Instruction = .read(dest_slice[0..4]);
+                inst.data_processing_immediate.pc_relative_addressing.adrp.immhi = split.hi;
+                inst.data_processing_immediate.pc_relative_addressing.adrp.immlo = split.lo;
+                inst.write(dest_slice[0..4]);
             },
             .arm64_pageoff12 => {
                 const page_off: u12 = @truncate(target_val);
 
                 // This could be one of several instructions: an `ADD`, an `LDR`, or an `STR`. The
-                // `LDR` and `STR` instructions have scale factors which we need to compensate for
-                // by dividing the value we store. Therefore, we need to figure out which case we're
-                // in by looking at the instruction encoding.
-                const inst: *align(1) aarch64.encoding.Instruction = @ptrCast(dest_slice[0..4]);
-                switch (macho.targetLoad(inst).decode()) {
+                // `LDR` and `STR` instructions have scale factors which we need to compensate for,
+                // so we need to decode the instruction to figure out which case we're in.
+                var inst: aarch64.encoding.Instruction = .read(dest_slice[0..4]);
+                switch (inst.decode()) {
                     .data_processing_immediate => {
-                        var x = macho.targetLoad(inst);
-                        x.data_processing_immediate.add_subtract_immediate.group.imm12 = page_off;
-                        macho.targetStore(inst, x);
+                        inst.data_processing_immediate.add_subtract_immediate.group.imm12 = page_off;
                     },
                     .load_store => |ls| {
                         const scale: u3 = switch (ls.register_unsigned_immediate.decode()) {
@@ -644,12 +639,11 @@ const Reloc = struct {
                         if (shifted << scale != page_off) {
                             return error.RelocationMisaligned;
                         }
-                        var x = macho.targetLoad(inst);
-                        x.load_store.register_unsigned_immediate.group.imm12 = shifted;
-                        macho.targetStore(inst, x);
+                        inst.load_store.register_unsigned_immediate.group.imm12 = shifted;
                     },
                     else => unreachable,
                 }
+                inst.write(dest_slice[0..4]);
             },
         }
     }
@@ -3033,7 +3027,7 @@ fn loadObject(
             };
 
             const dest_slice = atoms.items[atom_index].index.node(macho).sliceConst(&macho.mf)[offset_in_atom..];
-            if (!internal_type.validateInst(macho, dest_slice)) {
+            if (!internal_type.validateInst(dest_slice)) {
                 return diags.failParse(path, "relocation '{s}' against invalid instruction", .{
                     reloc_type_str,
                 });
@@ -3719,57 +3713,23 @@ fn writeStubEntry(macho: *MachO, stub_index: u64, got_index: u64) void {
         .aarch64 => {
             // The first instruction of the stub will be an ADRP for which we need to compute the
             // offset from that instruction's 4k page to the GOT entry's 4k page.
-            const Imm21 = packed union {
-                raw: i21,
-                split: packed struct(u21) { lo: u2, hi: u19 },
-            };
-            const page_off: Imm21 = page_off: {
-                const cur_page: u53 = @intCast((new_stub_vaddr + 4) >> 12); // first instruction, so pc = stub addr + 4
-                const target_page: u53 = @intCast(got_entry_vaddr >> 12);
-                const off: i53 = @bitCast(target_page -% cur_page);
-                break :page_off .{ .raw = @intCast(off) };
-            };
+            const cur_page_base = (new_stub_vaddr >> 12) << 12;
+            const target_page_base = (got_entry_vaddr >> 12) << 12;
+            const cur_page_to_target_page: i64 = @bitCast(target_page_base - cur_page_base);
 
-            const Inst = packed union(u32) {
-                raw: u32,
-                adrp: packed struct(u32) {
-                    reg: u5,
-                    immhi: u19,
-                    other0: u5,
-                    immlo: u2,
-                    other1: u1,
-                },
-                ldr: packed struct(u32) {
-                    reg_t: u5,
-                    reg_n: u5,
-                    imm12: u12,
-                    other0: u10,
-                },
-            };
-            const insts: []align(4) Inst = @ptrCast(@alignCast(
+            // Then we will use an LDR to reference the GOT entry on that page.
+            const target_page_off: u12 = @truncate(got_entry_vaddr);
+
+            const insts: []align(4) aarch64.encoding.Instruction = @ptrCast(@alignCast(
                 macho.known_sections.stubs.node(macho).slice(&macho.mf)[@intCast(stub_offset)..][0..entry_size],
             ));
-            @memcpy(insts, @as([]const Inst, &.{
-                // adrp x16, got_entry@page
-                .{ .adrp = .{
-                    .reg = 0b10000,
-                    .immhi = page_off.split.hi,
-                    .other0 = 0b100_00,
-                    .immlo = page_off.split.lo,
-                    .other1 = 0b1,
-                } },
-                // ldr x16, [x16, got_entry@pageoff]
-                .{ .ldr = .{
-                    .reg_t = 0b10000,
-                    .reg_n = 0b10000,
-                    .imm12 = @divExact(@as(u12, @truncate(got_entry_vaddr)), 8),
-                    .other0 = 0b11_111_0_01_01,
-                } },
-                // br x16
-                .{ .raw = 0xd61f0200 },
+            @memcpy(insts, @as([]const aarch64.encoding.Instruction, &.{
+                .adrp(.x16, @intCast(cur_page_to_target_page)),
+                .ldr(.x16, .{ .unsigned_offset = .{ .base = .x16, .offset = target_page_off } }),
+                .br(.x16),
             }));
-            if (macho.targetEndian() != std.lang.Endian.native) {
-                std.mem.byteSwapAllElements(Inst, insts);
+            if (.little != std.lang.Endian.native) { // aarch64 instructions are little-endian
+                std.mem.byteSwapAllElements(aarch64.encoding.Instruction, insts);
             }
         },
         .x86_64 => {
