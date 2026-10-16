@@ -2127,13 +2127,6 @@ pub const Value = struct {
                             .large => value.location_payload.large.stack_slot = vi.allocStackSlot(isel),
                         }
                     }
-                    switch (value.flags.location_tag) {
-                        .extreme => unreachable,
-                        .small => {},
-                        .large => {
-                            try vi.reextendAdvanced(isel, vi.bitSize(isel), mat.extension, vi.extension(isel));
-                        },
-                    }
                     const vi_loc = vi.location(isel).?;
                     const maybe_loc_reg = vi_loc.asRegister();
                     if (maybe_loc_reg) |loc_reg| {
@@ -2154,6 +2147,13 @@ pub const Value = struct {
                         const loc_live = isel.live_registers.getPtr(loc_reg);
                         assert(loc_live.* == .allocating);
                         loc_live.* = vi;
+                    }
+                    switch (value.flags.location_tag) {
+                        .extreme => unreachable,
+                        .small => {},
+                        .large => {
+                            try vi.reextendAdvanced(isel, vi.bitSize(isel), mat.extension, vi.extension(isel));
+                        },
                     }
                 },
                 .value => unreachable,
