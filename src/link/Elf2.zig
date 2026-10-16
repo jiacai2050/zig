@@ -137,11 +137,18 @@ node_global_symbols: std.array_hash_map.Auto(MappedFile.Node.Index, Symbol.Globa
 /// See the definition of `DsoGlobals`.
 dso_globals: DsoGlobals,
 
-/// Contains all defined global symbols that do not have a node.
-nodeless_globals: std.array_hash_map.Auto(Symbol.Global.Index, void),
+/// Contains all global symbols defined relative to `.bss`. These globals are not associated with
+/// any `MappedFile.Node`, but they need to be updated when the address of `.bss` changes.
+bss_globals: std.array_hash_map.Auto(Symbol.Global.Index, void),
+/// Contains all global symbols defined relative to `.tbss`. These globals are not associated with
+/// any `MappedFile.Node`, but they need to be updated when the address of `.tbss` changes.
+tbss_globals: std.array_hash_map.Auto(Symbol.Global.Index, void),
 
-// These are needed to find local symbols when a nodeless section moves.
+/// Contains all inputs which have added input sections to `.bss`, so that we can update local
+/// symbols when the address of `.bss` changes.
 bss_inputs: std.ArrayList(Node.InputIndex),
+/// Contains all inputs which have added input sections to `.tbss`, so that we can update local
+/// symbols when the address of `.tbss` changes.
 tbss_inputs: std.ArrayList(Node.InputIndex),
 
 shstrtab: StringTable,
@@ -2747,7 +2754,6 @@ fn addGlobalSymbol(elf: *Elf, opts: Symbol.Global.AddOptions) (error{
     try elf.globals.ensureUnusedCapacity(gpa, 1);
     try elf.globals_by_name.ensureUnusedCapacity(gpa, 1);
     try elf.node_global_symbols.ensureUnusedCapacity(gpa, 1);
-    try elf.nodeless_globals.ensureUnusedCapacity(gpa, 1);
 
     try Section.Index.symtab.node(elf).ensureMinimumSize(gpa, &elf.mf, switch (elf.shdrPtr(.symtab)) {
         inline else => |shdr, class| elf.targetLoad(&shdr.size) + @sizeOf(class.ElfN().Sym),
@@ -2915,8 +2921,16 @@ fn addGlobalSymbol(elf: *Elf, opts: Symbol.Global.AddOptions) (error{
         old_head_ptr.prev_in_node = .wrap(gsi);
     }
 
-    if (opts.node == .none and opts.shndx != .UNDEF) {
-        elf.nodeless_globals.putAssumeCapacity(gsi, {});
+    if (elf.ehdrType() != .REL) {
+        if (opts.shndx == elf.shndx.bss) {
+            assert(opts.node == .none);
+            try elf.bss_globals.put(gpa, gsi, {});
+        } else if (elf.ni.tls != .none and opts.shndx == elf.shndx.tbss) {
+            assert(opts.node == .none);
+            try elf.tbss_globals.put(gpa, gsi, {});
+        } else if (opts.shndx != .UNDEF and opts.shndx != .ABS) {
+            assert(opts.node != .none);
+        }
     }
 
     if (force_local_bind) {
@@ -3356,8 +3370,9 @@ fn setGlobalSymbolValue(elf: *Elf, gsi: Symbol.Global.Index, new: struct {
     type: std.elf.STT,
     shndx: Section.Index,
 }) Error!void {
-    assert(new.shndx != .UNDEF);
+    const gpa = elf.base.comp.gpa;
 
+    assert(new.shndx != .UNDEF);
     const global_ptr = gsi.ptr(elf);
 
     if (global_ptr.symtab_index.ptr(elf).node.unwrap()) |old_node| {
@@ -3379,11 +3394,21 @@ fn setGlobalSymbolValue(elf: *Elf, gsi: Symbol.Global.Index, new: struct {
     } else {
         assert(global_ptr.next_in_node == .none);
         assert(global_ptr.prev_in_node == .none);
+        // If the symbol didn't have a node, it may have been in `.bss` or `.tbss`.
+        _ = elf.bss_globals.swapRemove(gsi);
+        _ = elf.tbss_globals.swapRemove(gsi);
     }
 
-    _ = elf.nodeless_globals.swapRemove(gsi);
-    if (new.node == .none) {
-        try elf.nodeless_globals.put(elf.base.comp.gpa, gsi, {});
+    if (elf.ehdrType() != .REL) {
+        if (new.shndx == elf.shndx.bss) {
+            assert(new.node == .none);
+            try elf.bss_globals.put(gpa, gsi, {});
+        } else if (elf.ni.tls != .none and new.shndx == elf.shndx.tbss) {
+            assert(new.node == .none);
+            try elf.tbss_globals.put(gpa, gsi, {});
+        } else if (new.shndx != .UNDEF) {
+            assert(new.node != .none);
+        }
     }
 
     global_ptr.symtab_index.ptr(elf).node = new.node;
@@ -3667,7 +3692,8 @@ fn deleteOwnedDynsym(elf: *Elf, gsi: Symbol.Global.Index) std.mem.Allocator.Erro
 
 const Symbol = struct {
     /// The node which this symbol's value is defined relative to. Possible values are:
-    /// * `.none` for a SHN_ABS or SHN_UNDEF symbol
+    /// * `.none` for a SHN_ABS or SHN_UNDEF symbol, *or* a symbol in `.bss`/`.tbss`
+    ///   (see `Elf.bss_globals` and `Elf.tbss_globals`)
     /// * A section (the symbol's value is some vaddr in that section)
     /// * An input section (the symbol's value is some vaddr in that input section)
     /// * A NAV, UAV, or lazy code/data (the symbol's value is exactly the vaddr of that node)
@@ -4783,7 +4809,8 @@ fn create(
             .symbols = .empty,
             .default_sym_vers = .empty,
         },
-        .nodeless_globals = .empty,
+        .bss_globals = .empty,
+        .tbss_globals = .empty,
         .bss_inputs = .empty,
         .tbss_inputs = .empty,
         .shstrtab = .{ .map = .empty },
@@ -4868,7 +4895,8 @@ pub fn deinit(elf: *Elf) void {
     elf.dso_globals.string_bytes.deinit(gpa);
     elf.dso_globals.symbols.deinit(gpa);
     elf.dso_globals.default_sym_vers.deinit(gpa);
-    elf.nodeless_globals.deinit(gpa);
+    elf.bss_globals.deinit(gpa);
+    elf.tbss_globals.deinit(gpa);
     elf.bss_inputs.deinit(gpa);
     elf.tbss_inputs.deinit(gpa);
     elf.shstrtab.map.deinit(gpa);
@@ -11601,6 +11629,7 @@ fn updateNobitsAddress(
     old_symbol_base: u64,
     new_symbol_base: u64,
     inputs: []const Node.InputIndex,
+    globals: []const Symbol.Global.Index,
 ) void {
     assert(shndx != .UNDEF);
 
@@ -11611,8 +11640,6 @@ fn updateNobitsAddress(
         },
     }
 
-    const expected_shndx = shndx.toSection().?;
-
     // Update local symbols.
     for (inputs) |ii| {
         var lsi, const end_lsi = ii.localSymbolRange(elf);
@@ -11620,14 +11647,14 @@ fn updateNobitsAddress(
         while (lsi != end_lsi) : (lsi = @fromBackingInt(
             @backingInt(lsi) + 1,
         )) {
-            const symbol_shndx, const visibility = switch (elf.symPtr(lsi.index())) {
+            const symbol_shndx: Section.Index, const visibility = switch (elf.symPtr(lsi.index())) {
                 inline else => |sym| .{
-                    elf.targetLoad(&sym.shndx),
+                    .fromSection(elf.targetLoad(&sym.shndx)),
                     elf.targetLoad(&sym.other).visibility,
                 },
             };
 
-            if (symbol_shndx != expected_shndx) continue;
+            if (symbol_shndx != shndx) continue;
 
             switch (visibility) {
                 // These are globals demoted to STB_LOCAL and are updated below.
@@ -11644,16 +11671,14 @@ fn updateNobitsAddress(
         }
     }
 
-    // Update globals.
-    // Since nobits sections have no nodes, we can't just iterate over `node_global_symbols`,
-    // so instead filter manually through nodeless symbols.
-    for (elf.nodeless_globals.keys()) |gsi| {
+    // Update global symbols.
+    for (globals) |gsi| {
         const symbol: Symbol.Id = .global(gsi);
 
-        const symbol_shndx = switch (elf.symPtr(symbol.index(elf))) {
-            inline else => |sym| elf.targetLoad(&sym.shndx),
+        const sym_shndx: Section.Index = switch (elf.symPtr(symbol.index(elf))) {
+            inline else => |sym| .fromSection(elf.targetLoad(&sym.shndx)),
         };
-        if (symbol_shndx != expected_shndx) continue;
+        assert(sym_shndx == shndx);
 
         symbol.flushMoved(
             elf,
@@ -11687,6 +11712,7 @@ fn loadSegmentChildrenMoved(
             old_bss_addr,
             new_bss_addr,
             elf.bss_inputs.items,
+            elf.bss_globals.keys(),
         );
     }
 
@@ -11920,6 +11946,7 @@ fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
                             old_tbss_base,
                             new_tbss_base,
                             elf.tbss_inputs.items,
+                            elf.tbss_globals.keys(),
                         );
 
                         // TPOFF relocations care about the size of the TLS segment. Re-apply
