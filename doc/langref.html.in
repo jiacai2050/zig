@@ -1906,47 +1906,66 @@ const B = error{Two};
       {#code|ambiguous_precedence_orelse.zig#}
 
       <p>
-      Simplified operator precedence tables are provided below, each tailored to a general group of
-      operators. For all of the groups shown below, the operators that have higher precedence are
-      the same, and themselves have the following precedence table:
+      There is a set of operators (prefix operators, suffix operators, etc) that have unambiguously
+      higher precedence than all other operators. That set of operators has the following precedence table:
       </p>
 
       <pre>{#syntax#}x() x[] x.y x.* x.?
 a!b
 x{}
-!x -x -%x ~x &x ?x try{#endsyntax#}</pre>
+!x -x -%x ~x &x ?x try
+// lower precedence operators omitted{#endsyntax#}</pre>
 
       <p>
-      For the tables below, the operators that have ambiguous precedence or semantic errors with the
-      given operators have been omitted, as have operators with higher precedence. 
-      The operators colored <span style="color: #C54675;">red</span> and
-      <span style="color: #419AFF;">blue</span> have ambiguous precedence with the other operators
-      on the same line. Those colored <span style="color: #C54675;">red</span> also have ambiguous
+      For the other operators, simplified operator precedence tables are provided below, each containing only
+      the information that you'll need to know when reading/writing code that uses that particular category of operators.
+      The operators that have ambiguous precedence or semantic errors with the relevant operators have been omitted,
+      as have the operators with higher precedence (those shown above).
+      </p>
+
+      <details style="display:none;" id="ambig-details">
+      <summary style="cursor:pointer;">Toggle operator precedence ambiguity details</summary>
+      <p>
+      The operators that look <span class="ambig-chain">like this</span> have ambiguous precedence with the other operators
+      on the same line. Those that look <span class="ambig-nonchain">like this</span> also have ambiguous
       precedence with themselves (they cannot be chained).
       </p>
+      </details>
+
+      <script>
+        let ambig_details = document.getElementById("ambig-details");
+        ambig_details.style.display = 'block';
+        ambig_details.addEventListener("toggle", (event) => {
+          document.querySelectorAll('.ambig-chain').forEach(e => { e.classList.toggle('tok-number'); });
+          document.querySelectorAll('.ambig-nonchain').forEach(e => {
+            e.classList.toggle('tok-number');
+            e.style.borderBottom = ambig_details.open ? '1px dotted' : '';
+          });
+        });
+      </script>
 
       <p>
       For arithmetic operators:
       </p>
 
-      <pre><code>* / *% *| <span style="color: #C54675;">%</span>
+      <pre><code>* / *% *| <span class="ambig-nonchain">%</span>
 + - +% -% +| -|
-<span style="color: #C54675;">== != &lt; > &lt;= >=</span>
-<span style="color: #419AFF;">and or</span></code></pre>
+<span class="ambig-nonchain">==</span> <span class="ambig-nonchain">!=</span> <span class="ambig-nonchain">&lt;</span> <span class="ambig-nonchain">></span> <span class="ambig-nonchain">&lt;=</span> <span class="ambig-nonchain">>=</span>
+<span class="ambig-chain">and or</span></code></pre>
 
       <p>
       For bitwise operators:
       </p>
 
-      <pre><code><span style="color: #C54675;">&lt;&lt; &lt;&lt;| >></span> <span style="color: #419AFF;">& ^ |</span>
-<span style="color: #C54675;">== != &lt; > &lt;= >=</span>
-<span style="color: #419AFF;">and or</span></code></pre>
+      <pre><code><span class="ambig-nonchain">&lt;&lt;</span> <span class="ambig-nonchain">&lt;&lt;|</span> <span class="ambig-nonchain">>></span> <span class="ambig-chain">& ^ |</span>
+<span class="ambig-nonchain">==</span> <span class="ambig-nonchain">!=</span> <span class="ambig-nonchain">&lt;</span> <span class="ambig-nonchain">></span> <span class="ambig-nonchain">&lt;=</span> <span class="ambig-nonchain">>=</span>
+<span class="ambig-chain">and or</span></code></pre>
 
       <p>
       For null and error recovery operators:
       </p>
 
-      <pre><code><span style="color: #419AFF;">catch orelse</span></code></pre>
+      <pre><code><span class="ambig-chain">catch orelse</span></code></pre>
 
       <p>
       For error set operators:
