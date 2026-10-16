@@ -6615,8 +6615,23 @@ fn moveConstant(isel: *Select, dst: Value.Location, init_constant: Constant, ini
                     .field => |field_idx| {
                         var base_ptr = ip.indexToKey(field_idx.base).ptr;
                         const agg_ty: ZigType = .fromInterned(ip.indexToKey(base_ptr.ty).ptr_type.child);
-                        base_ptr.byte_offset += agg_ty.structFieldOffset(@intCast(field_idx.index), zcu) + ptr.byte_offset;
-                        continue :constant_key .{ .ptr = base_ptr };
+                        switch (ip.indexToKey(agg_ty.toIntern())) {
+                            .ptr_type => |ptr_ty| {
+                                assert(ptr_ty.flags.size == .slice);
+                                const field_offset = switch (field_idx.index) {
+                                    Constant.slice_ptr_index => 0,
+                                    Constant.slice_len_index => isel.gprSize(),
+                                    else => unreachable,
+                                };
+                                base_ptr.byte_offset += ptr.byte_offset + field_offset;
+                                continue :constant_key .{ .ptr = base_ptr };
+                            },
+                            .struct_type, .tuple_type, .union_type => {
+                                base_ptr.byte_offset += agg_ty.structFieldOffset(@intCast(field_idx.index), zcu) + ptr.byte_offset;
+                                continue :constant_key .{ .ptr = base_ptr };
+                            },
+                            else => unreachable,
+                        }
                     },
                     .comptime_alloc, .comptime_field, .arr_elem => unreachable,
                 };
