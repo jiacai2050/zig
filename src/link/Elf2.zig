@@ -151,6 +151,11 @@ bss_inputs: std.ArrayList(Node.InputIndex),
 /// symbols when the address of `.tbss` changes.
 tbss_inputs: std.ArrayList(Node.InputIndex),
 
+/// Indicates that the address of the `.bss` section needs to be updated.
+///
+/// Equivalent to a `PROGBITS` section's `MappedFile.Node` being marked as "moved".
+bss_moved: bool,
+
 shstrtab: StringTable,
 strtab: StringTable,
 dynstr: StringTable,
@@ -4815,6 +4820,7 @@ fn create(
         .tbss_globals = .empty,
         .bss_inputs = .empty,
         .tbss_inputs = .empty,
+        .bss_moved = false,
         .shstrtab = .{ .map = .empty },
         .strtab = .{ .map = .empty },
         .dynstr = .{ .map = .empty },
@@ -6426,20 +6432,12 @@ fn getNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
     };
 }
 
-fn tbssBaseOffset(elf: *Elf) u64 {
-    const tbss_addr = elf.shndx.tbss.vaddr(elf);
-
-    // Hasn't been laid out yet.
-    if (tbss_addr == 0 or elf.ehdrType() == .REL) return 0;
-
-    const tls_ni = elf.ni.tls.unwrap().?;
-    const tls_phndx = elf.getNode(tls_ni).segment;
-
-    const tls_vaddr = switch (elf.phdrSlice()) {
-        inline else => |phdr| elf.targetLoad(&phdr[tls_phndx].vaddr),
+fn tbssOffset(elf: *Elf) u64 {
+    // The `.tbss` section is placed exactly at the end of the TLS segment.
+    const tls_phndx = elf.getNode(elf.ni.tls.unwrap().?).segment;
+    return switch (elf.phdrSlice()) {
+        inline else => |phdr| elf.targetLoad(&phdr[tls_phndx].filesz),
     };
-
-    return tbss_addr - tls_vaddr;
 }
 
 fn computeNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
@@ -7921,7 +7919,7 @@ fn loadObject(
                                         if (elf.ni.tls != .none and
                                             nobits.shndx == elf.shndx.tbss)
                                         {
-                                            break :base elf.tbssBaseOffset();
+                                            break :base elf.tbssOffset();
                                         }
                                         assert(nobits.shndx == elf.shndx.bss);
                                         break :base nobits.shndx.vaddr(elf);
@@ -10871,12 +10869,46 @@ pub fn idle(elf: *Elf) link.Error!bool {
             if (clean_moved or clean_resized or clean_next_moved) try elf.flushPadding(ni);
             break :task;
         }
+        if (elf.bss_moved) {
+            elf.bss_moved = false;
+
+            const data_phndx = elf.getNode(elf.ni.data).segment;
+            const data_offset: u64, const data_vaddr: u64, const data_filesz: u64 = switch (elf.phdrSlice()) {
+                inline else => |phdr| .{
+                    elf.targetLoad(&phdr[data_phndx].offset),
+                    elf.targetLoad(&phdr[data_phndx].vaddr),
+                    elf.targetLoad(&phdr[data_phndx].filesz),
+                },
+            };
+
+            const old_bss_addr = elf.shndx.bss.vaddr(elf);
+            const new_bss_addr = data_vaddr + data_filesz;
+
+            const bss_section_sym: Symbol.Id = .local(elf.shndx.bss.get(elf).lsi);
+            bss_section_sym.flushMoved(elf, new_bss_addr);
+            switch (elf.shdrPtr(elf.shndx.bss)) {
+                inline else => |shdr| {
+                    elf.targetStore(&shdr.offset, @intCast(data_offset + data_filesz));
+                    elf.targetStore(&shdr.addr, @intCast(new_bss_addr));
+                },
+            }
+            elf.flushMovedNobitsSymbols(
+                elf.shndx.bss,
+                old_bss_addr,
+                new_bss_addr,
+                elf.bss_inputs.items,
+                elf.bss_globals.keys(),
+            );
+
+            break :task;
+        }
     }
     if (elf.inputs.items.len - elf.input_pending_index > 0) return true;
     if (elf.input_sections.items.len - elf.input_section_pending_index > 0) return true;
     if (elf.one_shot_fixups.items.len > 0) return true;
     if (elf.changed_symtab_index.count() > 0) return true;
     if (elf.mf.updates.items.len > 0) return true;
+    if (elf.bss_moved) return true;
     return false;
 }
 
@@ -11231,8 +11263,23 @@ fn flushElfOffset(elf: *Elf, ni: MappedFile.Node.Index) void {
                 inline else => |phdr, class| {
                     const ph = &phdr[phndx];
                     elf.targetStore(&ph.offset, @intCast(elf_offset));
-                    if (elf.targetLoad(&ph.type) == .PHDR) {
-                        @field(elf.ehdrPtr(), @tagName(class)).phoff = ph.offset;
+                    switch (elf.targetLoad(&ph.type)) {
+                        .PHDR => {
+                            const ehdr = @field(elf.ehdrPtr(), @tagName(class));
+                            elf.targetStore(&ehdr.phoff, @intCast(elf_offset));
+                        },
+                        .TLS => {
+                            // The `.tbss` section's offset should be at the end of the TLS segment.
+                            const tls_filesz = elf.targetLoad(&ph.filesz);
+                            const tbss_shdr = @field(elf.shdrPtr(elf.shndx.tbss), @tagName(class));
+                            elf.targetStore(&tbss_shdr.offset, @intCast(elf_offset + tls_filesz));
+                        },
+                        else => if (ni == elf.ni.data) {
+                            // The `.bss` section's offset should be at the end of the data segment.
+                            const data_filesz = elf.targetLoad(&ph.filesz);
+                            const bss_shdr = @field(elf.shdrPtr(elf.shndx.bss), @tagName(class));
+                            elf.targetStore(&bss_shdr.offset, @intCast(elf_offset + data_filesz));
+                        },
                     }
                 },
             }
@@ -11283,23 +11330,16 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                         },
 
                         .TLS => {
-                            const tbss_base = elf.tbssBaseOffset();
                             const new_vaddr = elf.computeNodeVAddr(ni);
-                            const tls_offset = elf.targetLoad(&ph.offset);
-                            const tls_filesz = elf.targetLoad(&ph.filesz);
-
                             elf.targetStore(&ph.vaddr, @intCast(new_vaddr));
                             elf.targetStore(&ph.paddr, @intCast(new_vaddr));
 
-                            const tbss_shndx = elf.shndx.tbss;
-                            const tbss_addr = new_vaddr + tbss_base;
-                            switch (elf.shdrPtr(tbss_shndx)) {
-                                inline else => |shdr| {
-                                    elf.targetStore(&shdr.addr, @intCast(tbss_addr));
-                                    elf.targetStore(&shdr.offset, @intCast(tls_offset + tls_filesz));
-                                },
+                            // Update the address of the `.tbss` section at the end of this segment:
+                            const tbss_addr = new_vaddr + elf.tbssOffset();
+                            switch (elf.shdrPtr(elf.shndx.tbss)) {
+                                inline else => |shdr| elf.targetStore(&shdr.addr, @intCast(tbss_addr)),
                             }
-                            Symbol.Id.local(tbss_shndx.get(elf).lsi).flushMoved(
+                            Symbol.Id.local(elf.shndx.tbss.get(elf).lsi).flushMoved(
                                 elf,
                                 tbss_addr,
                             );
@@ -11634,26 +11674,21 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
     try ni.childrenMoved(elf.base.comp.gpa, &elf.mf);
 }
 
-/// Update the position of a `NOBITS` section.
-/// BSS needs an absolute symbol base, and TBSS needs TLS-segment-relative base.
-fn updateNobitsAddress(
+/// Update the value of all symbols in a `NOBITS` section. All symbol values are updated to
+/// `old_value - old_symbol_base + new_symbol_base`.
+///
+/// For `.bss`, the symbol base is the section's virtual address.
+///
+/// For `.tbss`, the symbol base is the offset into the TLS segment.
+fn flushMovedNobitsSymbols(
     elf: *Elf,
     shndx: Section.Index,
-    new_section_addr: u64,
-    new_file_offset: u64,
     old_symbol_base: u64,
     new_symbol_base: u64,
     inputs: []const Node.InputIndex,
     globals: []const Symbol.Global.Index,
 ) void {
     assert(shndx != .UNDEF);
-
-    switch (elf.shdrPtr(shndx)) {
-        inline else => |shdr| {
-            elf.targetStore(&shdr.addr, @intCast(new_section_addr));
-            elf.targetStore(&shdr.offset, @intCast(new_file_offset));
-        },
-    }
 
     // Update local symbols.
     for (inputs) |ii| {
@@ -11662,14 +11697,14 @@ fn updateNobitsAddress(
         while (lsi != end_lsi) : (lsi = @fromBackingInt(
             @backingInt(lsi) + 1,
         )) {
-            const symbol_shndx: Section.Index, const visibility = switch (elf.symPtr(lsi.index())) {
+            const sym_shndx: Section.Index, const visibility = switch (elf.symPtr(lsi.index())) {
                 inline else => |sym| .{
                     .fromSection(elf.targetLoad(&sym.shndx)),
                     elf.targetLoad(&sym.other).visibility,
                 },
             };
 
-            if (symbol_shndx != shndx) continue;
+            if (sym_shndx != shndx) continue;
 
             switch (visibility) {
                 // These are globals demoted to STB_LOCAL and are updated below.
@@ -11700,40 +11735,26 @@ fn updateNobitsAddress(
             symbol.value(elf) - old_symbol_base + new_symbol_base,
         );
     }
-
-    Symbol.Id.local(shndx.get(elf).lsi).flushMoved(
-        elf,
-        new_section_addr,
-    );
 }
 
-fn loadSegmentChildrenMoved(
+/// Updates `vaddr` and `paddr` of the segment header, and marks everything in the segment as moved.
+fn updateSegmentLoadAddress(
     elf: *Elf,
     segment_ni: MappedFile.Node.Index,
-    old_vaddr: u64,
     new_vaddr: u64,
-    offset: u64,
-    filesz: u64,
 ) std.mem.Allocator.Error!void {
-    if (segment_ni == elf.ni.data) {
-        const bss_shndx = elf.shndx.bss;
-        const old_bss_addr = bss_shndx.vaddr(elf);
-        const new_bss_addr = new_vaddr + filesz;
+    const phndx = elf.getNode(segment_ni).segment;
 
-        elf.updateNobitsAddress(
-            bss_shndx,
-            new_bss_addr,
-            offset + filesz,
-            old_bss_addr,
-            new_bss_addr,
-            elf.bss_inputs.items,
-            elf.bss_globals.keys(),
-        );
+    switch (elf.phdrSlice()) {
+        inline else => |phdr| {
+            assert(new_vaddr != elf.targetLoad(&phdr[phndx].vaddr));
+            elf.targetStore(&phdr[phndx].vaddr, @intCast(new_vaddr));
+            elf.targetStore(&phdr[phndx].paddr, @intCast(new_vaddr));
+        },
     }
 
-    if (old_vaddr != new_vaddr) {
-        try segment_ni.childrenMoved(elf.base.comp.gpa, &elf.mf);
-    }
+    try segment_ni.childrenMoved(elf.base.comp.gpa, &elf.mf);
+    if (segment_ni == elf.ni.data) elf.bss_moved = true;
 }
 
 /// Given the index of a `PT_LOAD`/`PT_NULL` segment, assumes that the phdr's `offset` and `filesz`
@@ -11852,19 +11873,7 @@ fn allocateSegmentLoadAddress(elf: *Elf, orig_phndx: u32) std.mem.Allocator.Erro
                         const next_offset = elf.targetLoad(&next_ph.offset);
                         const next_new_vaddr = next_align.forward(free_vaddr) + next_offset % next_align.toByteUnits();
 
-                        // This logic for updating the data segment's vaddr is identical to how we
-                        // will update the vaddr of `phndx` when we break from the loop.
-                        elf.targetStore(&next_ph.vaddr, @intCast(next_new_vaddr));
-                        elf.targetStore(&next_ph.paddr, @intCast(next_new_vaddr));
-
-                        const next_filesz = elf.targetLoad(&next_ph.filesz);
-                        try elf.loadSegmentChildrenMoved(
-                            next_ni,
-                            next_vaddr,
-                            next_new_vaddr,
-                            next_offset,
-                            next_filesz,
-                        );
+                        try elf.updateSegmentLoadAddress(next_ni, next_new_vaddr);
 
                         break;
                     },
@@ -11887,17 +11896,8 @@ fn allocateSegmentLoadAddress(elf: *Elf, orig_phndx: u32) std.mem.Allocator.Erro
             }
 
             if (vaddr != orig_vaddr) {
-                elf.targetStore(&phdr[phndx].vaddr, @intCast(vaddr));
-                elf.targetStore(&phdr[phndx].paddr, @intCast(vaddr));
+                try elf.updateSegmentLoadAddress(segment_ni, vaddr);
             }
-
-            try elf.loadSegmentChildrenMoved(
-                segment_ni,
-                orig_vaddr,
-                vaddr,
-                offset,
-                filesz,
-            );
         },
     }
 }
@@ -11926,40 +11926,46 @@ fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
         .ehdr => unreachable,
         .shdr => {},
         .segment => |phndx| switch (elf.phdrSlice()) {
-            inline else => |phdr| {
+            inline else => |phdr, class| {
                 assert(elf.phdrs.items[phndx].unwrap().? == ni);
                 const ph = &phdr[phndx];
-                elf.targetStore(&ph.filesz, @intCast(size));
                 switch (elf.targetLoad(&ph.type)) {
                     else => unreachable,
                     .NULL, .LOAD => {
+                        elf.targetStore(&ph.filesz, @intCast(size));
                         try elf.allocateSegmentLoadAddress(phndx);
+                        if (ni == elf.ni.data) elf.bss_moved = true;
                     },
                     .DYNAMIC, .INTERP, .PHDR, .GNU_EH_FRAME, .GNU_RELRO => {
+                        elf.targetStore(&ph.filesz, @intCast(size));
                         elf.targetStore(&ph.memsz, @intCast(size));
                     },
                     .TLS => {
-                        const tls_filesz: u64 = size;
+                        // We must fetch this value before modifying our `filesz`.
+                        const old_tbss_offset = elf.tbssOffset();
 
-                        const old_tbss_base = elf.tbssBaseOffset();
-                        const new_tbss_base = tls_filesz;
-                        const tbss_size = elf.shndx.tbss.size(elf);
-                        const tls_vaddr = elf.targetLoad(&ph.vaddr);
+                        elf.targetStore(&ph.filesz, @intCast(size));
+
+                        // Our memsz must include the `.tbss` section.
+                        const tls_align: Alignment = .fromByteUnits(elf.targetLoad(&ph.@"align"));
+                        elf.targetStore(&ph.memsz, @intCast(
+                            tls_align.forward(size + elf.shndx.tbss.size(elf)),
+                        ));
+
+                        // `.tbss` section goes at the end of this segment. Update its offset:
                         const tls_offset = elf.targetLoad(&ph.offset);
-
-                        const tls_memsz = std.mem.alignForward(
-                            u64,
-                            tls_filesz + tbss_size,
-                            elf.targetLoad(&ph.@"align"),
-                        );
-                        elf.targetStore(&ph.memsz, @intCast(tls_memsz));
-
-                        elf.updateNobitsAddress(
+                        const tbss_shdr = @field(elf.shdrPtr(elf.shndx.tbss), @tagName(class));
+                        elf.targetStore(&tbss_shdr.offset, @intCast(tls_offset + size));
+                        // and its address:
+                        const tls_vaddr = elf.targetLoad(&ph.vaddr);
+                        const tbss_section_sym: Symbol.Id = .local(elf.shndx.tbss.get(elf).lsi);
+                        tbss_section_sym.flushMoved(elf, tls_vaddr + size);
+                        elf.targetStore(&tbss_shdr.addr, @intCast(tls_vaddr + size));
+                        // and update the values of symbols in that section:
+                        elf.flushMovedNobitsSymbols(
                             elf.shndx.tbss,
-                            tls_vaddr + new_tbss_base,
-                            tls_offset + new_tbss_base,
-                            old_tbss_base,
-                            new_tbss_base,
+                            old_tbss_offset,
+                            size,
                             elf.tbss_inputs.items,
                             elf.tbss_globals.keys(),
                         );
