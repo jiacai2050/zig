@@ -3779,6 +3779,8 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) codegen.Error!void 
                         64 => .@"movfr2gr.d"(dst_reg, src_reg),
                     });
                     try src_mat.finish(isel);
+                } else if ((dst_ty.isAbiInt(zcu) and src_tag == .float) or ((dst_tag == .float and src_ty.isAbiInt(zcu)))) {
+                    try dst_vi.value.defMove(isel, ty_op.operand);
                 } else if (dst_ty.isAbiInt(zcu) and src_tag == .array and src_ty.childType(zcu).isAbiInt(zcu)) {
                     const dst_int_info = dst_ty.intInfo(zcu);
                     const src_child_int_info = src_ty.childType(zcu).intInfo(zcu);
