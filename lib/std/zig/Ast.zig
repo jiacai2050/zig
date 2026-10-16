@@ -571,13 +571,13 @@ pub fn renderError(tree: Ast, parse_error: Error, w: *Writer) Writer.Error!void 
             });
         },
         .hint_operator_precedence_left => {
-            return w.print("previously evaluated as `(... {s} ...) {s} ...`", .{
+            return w.print("in zig 0.17.x, this was evaluated as (... {s} ...) {s} ...", .{
                 tree.tokenTag(parse_error.token - @as(u32, @intCast(parse_error.extra.offset))).lexeme().?,
                 tree.tokenTag(parse_error.token).lexeme().?,
             });
         },
         .hint_operator_precedence_right => {
-            return w.print("previously evaluated as `... {s} (... {s} ...)`", .{
+            return w.print("in zig 0.17.x, this was evaluated as ... {s} (... {s} ...)", .{
                 tree.tokenTag(parse_error.token - @as(u32, @intCast(parse_error.extra.offset))).lexeme().?,
                 tree.tokenTag(parse_error.token).lexeme().?,
             });
