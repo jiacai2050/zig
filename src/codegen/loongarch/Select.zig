@@ -913,36 +913,8 @@ pub const Value = struct {
                 );
                 try vi_mat.finish(isel);
             } else {
-                const unused_bytes = std.math.divCeil(u64, unused_bits, 8) catch unreachable;
-                if (unused_bytes > isel.gprSize()) {
-                    try isel.failUnimplemented("unimplemented sign-extend width > GPR", .{});
-                    return;
-                }
-                const used_bytes = vi.size(isel) - unused_bytes;
-
-                var hit = false;
-                var walker = vi.walk(isel, .{});
-                while (walker.next()) |part_vi| {
-                    const part_offset = part_vi.offsetIn(isel, vi);
-                    const part_size = part_vi.size(isel);
-                    const part_end = part_offset + part_size;
-                    if (part_end <= used_bytes) continue;
-                    if (part_size > isel.gprSize()) continue;
-
-                    walker.skipChildren(part_vi);
-
-                    const part_mat = try part_vi.mat(isel, .{ .pref = .only_reg });
-                    try isel.fillUnusedBits(
-                        part_mat.reg(),
-                        part_mat.reg(),
-                        dst_ext,
-                        src_ext,
-                        @intCast(unused_bits - ((vi.size(isel) - part_end) * 8)),
-                    );
-                    try part_mat.finish(isel);
-                    if (hit) unreachable; // TODO
-                    hit = true;
-                }
+                try isel.failUnimplemented("unimplemented sign-extend width > GPR", .{});
+                return;
             }
         }
 
