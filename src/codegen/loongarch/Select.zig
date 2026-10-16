@@ -895,7 +895,7 @@ pub const Value = struct {
             };
             const unused_bits = @max(new_unused_bits, old_unused_bits);
             if (dst_ext == src_ext and bit_size <= old_bits) return;
-            tracking_log.debug("{f}: {t} ({t}) -> {t} ({t}), {d}b -> {d}b", .{ vi, src_ext, new_ext, dst_ext, old_ext, old_bits, bit_size });
+            tracking_log.debug("{f}: in {t} ({t}) -> out {t} ({t}), {d}b -> {d}b", .{ vi, src_ext, new_ext, dst_ext, old_ext, old_bits, bit_size });
 
             // avoid setting extension to .garbage to reduce MIR for sequences like
             // zero_ext -> garbage -> zero_ext
@@ -914,7 +914,10 @@ pub const Value = struct {
                 try vi_mat.finish(isel);
             } else {
                 const unused_bytes = std.math.divCeil(u64, unused_bits, 8) catch unreachable;
-                assert(unused_bytes <= isel.gprSize()); // TODO larger extending
+                if (unused_bytes > isel.gprSize()) {
+                    try isel.failUnimplemented("unimplemented sign-extend width > GPR", .{});
+                    return;
+                }
                 const used_bytes = vi.size(isel) - unused_bytes;
 
                 var hit = false;
