@@ -6540,7 +6540,28 @@ fn moveConstant(isel: *Select, dst: Value.Location, init_constant: Constant, ini
                 }
             },
             .enum_tag => |enum_tag| continue :constant_key .{ .int = ip.indexToKey(enum_tag.int).int },
-            .float => return isel.fail("float unimplemented", .{}),
+            .float => |float| {
+                if (isel.canUseFprForFloat(ZigType.fromInterned(float.ty).floatBits(isel.target))) {
+                    return isel.fail("float unimplemented", .{});
+                } else {
+                    switch (float.ty) {
+                        .f16_type => continue :constant_key .{ .int = .{
+                            .ty = .u16_type,
+                            .storage = .{ .u64 = @as(u16, @bitCast(float.storage.f16)) },
+                        } },
+                        .f32_type => continue :constant_key .{ .int = .{
+                            .ty = .u32_type,
+                            .storage = .{ .u64 = @as(u32, @bitCast(float.storage.f32)) },
+                        } },
+                        .f64_type => continue :constant_key .{ .int = .{
+                            .ty = .u64_type,
+                            .storage = .{ .u64 = @as(u64, @bitCast(float.storage.f64)) },
+                        } },
+                        .f80_type, .f128_type => {},
+                        else => unreachable,
+                    }
+                }
+            },
             .ptr => |ptr| {
                 assert(offset == 0 and size == isel.gprSize());
                 const dst_ra: Register.Alias, const use_tmp_reg = select_tmp: {
@@ -7390,7 +7411,7 @@ fn gprAlignment(isel: *Select) std.mem.Alignment {
     };
 }
 
-fn fprBits(isel: *Select) u7 {
+fn targetFprBits(isel: *Select) u7 {
     const cpu = &isel.target.cpu;
     if (cpu.has(.loongarch, .d)) {
         return 64;
@@ -7408,12 +7429,12 @@ fn vectorBits(isel: *Select) u7 {
     } else if (cpu.has(.loongarch, .lsx)) {
         return 128;
     } else {
-        return isel.fprBits();
+        return isel.targetFprBits();
     }
 }
 
 fn canUseFprForFloat(isel: *Select, bits: u16) bool {
-    return bits <= isel.fprBits();
+    return bits <= isel.targetFprBits();
 }
 
 fn typeOfField(isel: *Select, ty: ZigType, offset: u64) ?ZigType {
