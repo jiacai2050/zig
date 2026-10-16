@@ -684,16 +684,18 @@ const Section = struct {
                 }
             } else {
                 // For sections without nodes (NOBITS), propagate alignment to the parent.
-                assert(switch (elf.shdrPtr(shndx)) {
-                    inline else => |shdr| elf.targetLoad(&shdr.type) == .NOBITS,
-                });
+                switch (elf.shdrPtr(shndx)) {
+                    inline else => |shdr| assert(elf.targetLoad(&shdr.type) == .NOBITS),
+                }
 
                 if (elf.ehdrType() == .REL) return;
 
-                const segment_ni = if (shndx.flags(elf).TLS)
-                    elf.ni.tls.unwrap().?
-                else
-                    elf.ni.data;
+                const segment_ni: MappedFile.Node.Index = seg: {
+                    if (shndx == elf.shndx.bss) break :seg elf.ni.data;
+                    if (shndx == elf.shndx.tbss) break :seg elf.ni.tls.unwrap().?;
+                    // NOBITS sections other than `.bss` and `.tbss` are only emitted in `ET_REL`s.
+                    unreachable;
+                };
 
                 try elf.ensureSegmentAligned(elf.getNode(segment_ni).segment, min_align);
             }
@@ -7052,7 +7054,11 @@ fn mapInputSection(elf: *Elf, opts: struct {
     name: []const u8,
     flags: std.elf.SHF,
     entsize: std.elf.Xword,
-    type: std.elf.SHT = .PROGBITS,
+    /// Must be one of:
+    /// * `.PROGBITS`
+    /// * `.NOBITS`
+    /// * `.X86_64_UNWIND`
+    type: std.elf.SHT,
 }) (Error || error{
     UnsupportedSectionFlags,
     TlsSectionUnavailable,
@@ -7193,6 +7199,7 @@ fn navMapIndex(elf: *Elf, zcu: *Zcu, nav_index: InternPool.Nav.Index) Error!Node
                             nav.resolved.?.@"threadlocal",
                     },
                     .entsize = 0,
+                    .type = .PROGBITS,
                 })) |shndx| {
                     break :section shndx;
                 } else |err| switch (err) {
@@ -7900,27 +7907,32 @@ fn loadObject(
                             },
                         };
 
-                        const placement = sections[input_sym.shndx].placement;
-
-                        if (placement == .none) continue;
-
-                        const symbol_oni: MappedFile.Node.Index.Optional, const output_shndx, const symbol_value = switch (placement) {
+                        const symbol_oni: MappedFile.Node.Index.Optional, const output_shndx: Section.Index, const symbol_value: u64 = switch (sections[input_sym.shndx].placement) {
+                            .none => continue,
                             .progbits => |isi| .{
                                 .wrap(isi.node(elf)),
                                 elf.getNodeShndx(isi.node(elf)),
                                 input_sym.value,
                             },
-                            .nobits => |nobits| .{
-                                .none,
-                                nobits.shndx,
-                                (if (elf.ehdrType() == .REL)
-                                    @as(u64, 0)
-                                else if (nobits.shndx.flags(elf).TLS)
-                                    elf.tbssBaseOffset()
-                                else
-                                    nobits.shndx.vaddr(elf)) + nobits.offset + input_sym.value,
+                            .nobits => |nobits| sym: {
+                                const section_base: u64 = switch (elf.ehdrType()) {
+                                    .REL => 0,
+                                    .EXEC, .DYN => base: {
+                                        if (elf.ni.tls != .none and
+                                            nobits.shndx == elf.shndx.tbss)
+                                        {
+                                            break :base elf.tbssBaseOffset();
+                                        }
+                                        assert(nobits.shndx == elf.shndx.bss);
+                                        break :base nobits.shndx.vaddr(elf);
+                                    },
+                                };
+                                break :sym .{
+                                    .none,
+                                    nobits.shndx,
+                                    section_base + nobits.offset + input_sym.value,
+                                };
                             },
-                            .none => unreachable,
                         };
 
                         switch (input_sym.info.bind) {
@@ -9109,15 +9121,18 @@ fn addSection(elf: *Elf, segment_ni: MappedFile.Node.Index, opts: struct {
         .EXEC, .DYN => segment_ni,
     };
     assert(opts.addralign.check(opts.size));
-    const oni: MappedFile.Node.Index.Optional = if (opts.type == .NOBITS) .none else .wrap(elf.addNodeAssumeCapacity(try parent_ni.addFloatingChild(gpa, &elf.mf, .{
-        .size = opts.node_align.forward(opts.size),
-        .alignment = opts.addralign.max(opts.node_align),
-        .resized = opts.size > 0,
-        .bubbles_moved = opts.flags.ALLOC,
-    }), switch (opts.manual_size) {
-        false => .{ .section = shndx },
-        true => .{ .section_manual_size = shndx },
-    }));
+    const oni: MappedFile.Node.Index.Optional = switch (opts.type) {
+        .NOBITS => .none,
+        else => .wrap(elf.addNodeAssumeCapacity(
+            try parent_ni.addFloatingChild(gpa, &elf.mf, .{
+                .size = opts.node_align.forward(opts.size),
+                .alignment = opts.addralign.max(opts.node_align),
+                .resized = opts.size > 0,
+                .bubbles_moved = opts.flags.ALLOC,
+            }),
+            if (opts.manual_size) .{ .section_manual_size = shndx } else .{ .section = shndx },
+        )),
+    };
     const addr = if (oni.unwrap()) |ni| elf.computeNodeVAddr(ni) else 0;
     elf.shdrs.appendAssumeCapacity(.{
         .lsi = if (want_symbol) try elf.addLocalSymbol(.{
@@ -11700,7 +11715,7 @@ fn loadSegmentChildrenMoved(
     offset: u64,
     filesz: u64,
 ) std.mem.Allocator.Error!void {
-    if (segment_ni == elf.ni.data and elf.shndx.bss != .UNDEF) {
+    if (segment_ni == elf.ni.data) {
         const bss_shndx = elf.shndx.bss;
         const old_bss_addr = bss_shndx.vaddr(elf);
         const new_bss_addr = new_vaddr + filesz;
