@@ -2733,6 +2733,33 @@ pub fn analyze(isel: *Select, air_body: []const Air.Inst.Index) !void {
                     try isel.analyzeUse(arg);
                 }
             },
+            .legalize_compiler_rt_call => {
+                const compiler_rt_call = isel.air.unwrapCompilerRtCall(air_inst_index);
+
+                for (compiler_rt_call.args) |arg|
+                    try isel.analyzeUse(arg);
+
+                var cc_it: CallAbiIterator = .{
+                    .isel = isel,
+                    .cc = &compiler_rt_call.func.@"callconv"(isel.target),
+                };
+                if (try cc_it.resolve(compiler_rt_call.func.returnType(), true)) |ret_vi| {
+                    tracking_log.debug("{f} <- %{d} (call return)", .{ ret_vi, @backingInt(air_inst_index) });
+                    switch (ret_vi.parent(isel)) {
+                        .none => {},
+                        .value, .constant => unreachable,
+                        .address => |address_vi| {
+                            defer address_vi.deref(isel);
+                            const ret_value = ret_vi.get(isel);
+                            ret_value.flags.parent_tag = .none;
+                            ret_value.parent_payload = .{ .none = {} };
+                        },
+                    }
+                    try isel.live_values.putNoClobber(gpa, air_inst_index, ret_vi);
+
+                    try isel.def_order.putNoClobber(gpa, air_inst_index, {});
+                }
+            },
             .cond_br => {
                 const pl_op = air_data[@backingInt(air_inst_index)].pl_op;
                 const extra = isel.air.extraData(Air.CondBr, pl_op.payload);
