@@ -136,9 +136,8 @@ pub fn nextAllocMax(self: *@This(), allocator: Allocator, when: AllocWhen, max_v
     switch (token_type) {
         .number, .string => {
             var value_list: std.ArrayList(u8) = .empty;
-            errdefer {
-                value_list.deinit(allocator);
-            }
+            defer value_list.deinit(allocator);
+
             if (self.allocNextIntoArrayListMax(allocator, &value_list, when, max_value_len) catch |e| switch (e) {
                 error.BufferUnderrun => unreachable,
                 else => |err| return err,
@@ -1608,9 +1607,8 @@ pub const Reader = struct {
         switch (token_type) {
             .number, .string => {
                 var value_list: std.ArrayList(u8) = .empty;
-                errdefer {
-                    value_list.deinit(allocator);
-                }
+                defer value_list.deinit(allocator);
+
                 if (try self.allocNextIntoArrayListMax(allocator, &value_list, when, max_value_len)) |slice| {
                     return if (token_type == .number)
                         Token{ .number = slice }
