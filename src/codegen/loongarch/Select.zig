@@ -1300,7 +1300,6 @@ pub const Value = struct {
 
         /// Materializes a value
         fn mat(vi: Value.Index, isel: *Select, opts: MatOptions) codegen.Error!Mat {
-            // try vi.split(isel, true);
             const mat_size = @min(opts.size, @as(u32, @intCast(vi.size(isel) - opts.offset)));
             const loc_pref = if (opts.extension == .garbage)
                 opts.pref
@@ -4064,9 +4063,8 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) codegen.Error!void 
                     .{ 0, @as(u32, @intCast(payload_size)) };
 
                 const opt_vi = try isel.use(un_op);
-                const has_value_mat = try opt_vi.mat(isel, .{
-                    .offset = has_value_offset,
-                    .size = has_value_size,
+                const has_value_vi = try opt_vi.partExact(isel, has_value_offset, has_value_size);
+                const has_value_mat = try has_value_vi.mat(isel, .{
                     .pref = .only_reg,
                     .reg_mod = .integer,
                     .extension = .zero_ext,
