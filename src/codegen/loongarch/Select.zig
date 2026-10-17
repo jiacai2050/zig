@@ -4115,7 +4115,11 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) codegen.Error!void 
                 if (!ty.isRuntimeFloat()) {
                     if (!ty.isAbiInt(zcu)) return isel.fail("bad {t} {f}", .{ air_tag, isel.fmtType(ty) });
                     const int_info = ty.intInfo(zcu);
-                    if (int_info.bits > 64) return isel.fail("too big {t} {f}", .{ air_tag, isel.fmtType(ty) });
+                    if (int_info.bits > 64) {
+                        _ = res_vi.value.takeLocationMarkWritten(isel);
+                        try isel.failUnimplemented("too big {t} {f}", .{ air_tag, isel.fmtType(ty) });
+                        break :unused;
+                    }
 
                     try res_vi.value.reextendToGarbage(isel);
                     const res_reg = try res_vi.value.defRegMod(isel, .integer) orelse break :unused;
