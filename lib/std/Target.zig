@@ -3482,7 +3482,7 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) ?u16 {
             .longdouble => 128,
         },
 
-        .psx => switch (c_type) {
+        .psx, .ps3 => switch (c_type) {
             .char => 8,
             .short, .ushort => 16,
             .int, .uint, .long, .ulong, .float => 32,
@@ -3514,7 +3514,6 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) ?u16 {
 
         .opengl => null,
 
-        .ps3,
         .managarm,
         => @panic("specify the C integer and float type sizes for this OS"),
     };
