@@ -5207,7 +5207,7 @@ fn initHeaders(
             // Must be at least `addr_align` for `elf.ni.phdr` to be placed inside this node
             .alignment = node_block_align.max(addr_align),
             .moved = true,
-            .bubbles_moved = false,
+            .bubbles_moved = false, // see loadable segment handling in `flushMoved`
         }), .{ .segment = phndx.rodata });
         elf.phdrs.items[phndx.rodata] = .wrap(elf.ni.rodata);
 
@@ -5216,14 +5216,13 @@ fn initHeaders(
             .alignment = addr_align, // keep in sync with `elf.ni.rodata` alignment above
             .moved = true,
             .resized = true,
-            .bubbles_moved = false,
         }), .{ .segment = phndx.phdr });
         elf.phdrs.items[phndx.phdr] = .wrap(elf.ni.phdr);
 
         elf.ni.text = elf.addNodeAssumeCapacity(try elf.ni.elf.addFloatingChild(gpa, &elf.mf, .{
             .alignment = node_block_align,
             .moved = true,
-            .bubbles_moved = false,
+            .bubbles_moved = false, // see loadable segment handling in `flushMoved`
         }), .{ .segment = phndx.text });
         elf.phdrs.items[phndx.text] = .wrap(elf.ni.text);
 
@@ -5231,7 +5230,7 @@ fn initHeaders(
             // Must be at least `addr_align` for `elf.ni.data_rel_ro` to be placed inside this node
             .alignment = node_block_align.max(addr_align),
             .moved = true,
-            .bubbles_moved = false,
+            .bubbles_moved = false, // see loadable segment handling in `flushMoved`
         }), .{ .segment = phndx.data });
         elf.phdrs.items[phndx.data] = .wrap(elf.ni.data);
 
@@ -5239,7 +5238,7 @@ fn initHeaders(
             try elf.ni.elf.addFloatingChild(gpa, &elf.mf, .{
                 .alignment = node_block_align,
                 .moved = true,
-                .bubbles_moved = false,
+                .bubbles_moved = false, // see loadable segment handling in `flushMoved`
             }),
             .{ .segment = phndx.plt },
         ));
@@ -5249,7 +5248,6 @@ fn initHeaders(
             // later (if `have_dynamic_section`). Keep in sync with `elf.ni.data` alignment above.
             .alignment = node_block_align.max(addr_align),
             .moved = true,
-            .bubbles_moved = false,
         }), .{ .segment = phndx.relro });
         elf.phdrs.items[phndx.relro] = .wrap(elf.ni.data_rel_ro);
 
@@ -5258,7 +5256,7 @@ fn initHeaders(
                 try elf.ni.rodata.addFloatingChild(gpa, &elf.mf, .{
                     .alignment = node_block_align,
                     .moved = true,
-                    .bubbles_moved = false,
+                    .bubbles_moved = false, // see TLS segment handling in `flushMoved`
                 }),
                 .{ .segment = phndx.tls },
             ));
@@ -5676,7 +5674,6 @@ fn initHeaders(
                     .size = interp.len + 1,
                     .moved = true,
                     .resized = true,
-                    .bubbles_moved = false,
                 }),
                 .{ .segment = phndx.interp },
             );
@@ -5698,7 +5695,6 @@ fn initHeaders(
                 try elf.ni.data_rel_ro.addFloatingChild(gpa, &elf.mf, .{
                     .alignment = addr_align,
                     .moved = true,
-                    .bubbles_moved = false,
                 }),
                 .{ .segment = phndx.dynamic },
             );
@@ -5952,7 +5948,6 @@ fn initHeaders(
                     .size = @sizeOf(Dwarf.EhFrameHdr),
                     .alignment = .@"4",
                     .moved = true,
-                    .bubbles_moved = false,
                 }),
                 .{ .segment = phndx.gnu_eh_frame },
             );
@@ -9119,7 +9114,7 @@ fn addSection(elf: *Elf, segment_ni: MappedFile.Node.Index, opts: struct {
                 .size = opts.node_align.forward(opts.size),
                 .alignment = opts.addralign.max(opts.node_align),
                 .resized = opts.size > 0,
-                .bubbles_moved = opts.flags.ALLOC,
+                .bubbles_moved = opts.flags.ALLOC, // see handling in `flushMoved`
             }),
             if (opts.manual_size) .{ .section_manual_size = shndx } else .{ .section = shndx },
         )),
@@ -11309,6 +11304,9 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
 
                         .NULL, .LOAD => {
                             try elf.allocateSegmentLoadAddress(phndx);
+                            // Do not bubble moved---our child nodes only care if our virtual
+                            // address changes, which is handled by `updateSegmentLoadAddress`.
+                            return;
                         },
 
                         .DYNAMIC,
@@ -11336,6 +11334,12 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                                 elf,
                                 tbss_addr,
                             );
+
+                            // Do not bubble moved---our child nodes don't care about our virtual
+                            // address changing, because symbols in the TLS segment have values
+                            // defined relative to the base of the segment. (This is also why we
+                            // don't update tbss symbols here.)
+                            return;
                         },
                     }
                 },
@@ -11387,6 +11391,12 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                 elf.flushMovedNodeRelocs(ni, addr, .{
                     .first_symbol_reloc = elf.eh_frame_hdr_first_symbol_reloc,
                 });
+            }
+
+            if (!flags.ALLOC) {
+                // Do not bubble moved---our virtual address hasn't changed (because it's always 0
+                // for non-ALLOC sections), so there's nothing for our children to worry about.
+                return;
             }
         },
         .input_section => |isi| {
