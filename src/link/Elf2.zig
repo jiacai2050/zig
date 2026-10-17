@@ -12469,7 +12469,6 @@ fn ensurePltEntry(elf: *Elf, gsi: Symbol.Global.Index) Error!bool {
 
             // relocate the PLT entry to point to the .GOT.PLT entry
             const got_plt_abs = got_plt_section.vaddr(elf) + got_plt_offset;
-            // TODO: handle overflow gracefully
             const inst0: *align(1) link.loongarch.J20 = @ptrCast(plt_slice[0..4]);
             const inst1: *align(1) link.loongarch.K12 = @ptrCast(plt_slice[4..8]);
             elf.targetStore(inst0, .{
@@ -12635,7 +12634,6 @@ fn flushMovedPltSection(elf: *Elf, which: enum { plt, plt_sec, got_plt }, old_ad
                         const target_slice = plt_slice[plt_offset..];
 
                         const got_plt_abs: u64 = got_plt_addr + got_plt_offset;
-                        // TODO: handle overflow gracefully
                         const inst0: *align(1) link.loongarch.J20 = @ptrCast(target_slice[0..4]);
                         const inst1: *align(1) link.loongarch.K12 = @ptrCast(target_slice[4..8]);
 
