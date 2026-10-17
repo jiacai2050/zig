@@ -1943,26 +1943,18 @@ const SymbolReloc = struct {
         }
     };
 
-    fn flushMovedNode(reloc: *SymbolReloc, elf: *Elf, node_vaddr: u64) void {
-        if (reloc.rela_index.unwrap()) |rela_index| {
-            // The node has moved, so the offset of the relocation within the section might have
-            // changed, so update the `offset` field of the `ElfN.Rela` entry.
-            reloc.relaSection(elf).relaSetOffset(elf, rela_index, node_vaddr + reloc.offset);
-        }
-        // This is not just the inverse of the above condition, because if `reloc` is relative
-        // to the base of this DSO, then `rela_index` is an `R_*_RELATIVE` relocation, but we
-        // still need to call `SymbolReloc.apply` to update that relocation's addend.
-        if (elf.ehdrType() != .REL) {
-            reloc.apply(elf);
-        }
-    }
-
     fn apply(reloc: *SymbolReloc, elf: *Elf) void {
-        assert(elf.ehdrType() != .REL);
         const node = reloc.node.unwrap() orelse return; // deleted
         if (node.hasMoved(&elf.mf) or reloc.target.hasMoved(elf)) {
             // There's no point applying the relocation now, because it will be re-applied by
             // `flushMoved` at some point anyway.
+            return;
+        }
+        if (elf.ehdrType() == .REL) {
+            // All we need to do is update the output relocation.
+            const rela_index = reloc.rela_index.unwrap().?;
+            const reloc_addr = elf.getNodeVAddr(node) + reloc.offset;
+            reloc.relaSection(elf).relaSetOffset(elf, rela_index, reloc_addr);
             return;
         }
         switch (reloc.result) {
@@ -2030,7 +2022,11 @@ const SymbolReloc = struct {
         // is required, meaning we can handle it now and return early.
         if (reloc.rela_index.unwrap()) |rela_index| switch (elf.classifySymbolValue(reloc.target)) {
             .static => unreachable,
-            .dynamic => return, // the relocation happens at runtime
+            .dynamic => {
+                // The relocation happens at runtime; we just need to update its offset.
+                elf.shndx.rela_dyn.relaSetOffset(elf, rela_index, dest_vaddr);
+                return;
+            },
             .static_relative => {
                 // We have emitted an R_*_RELATIVE relocation to help lower an absolute-address
                 // relocation. The value computed above is valid, but instead of writing it to the
@@ -2042,6 +2038,7 @@ const SymbolReloc = struct {
                 }
                 assert(reloc.type.action.simple.cast == .unsigned);
                 assert(reloc.type.action.simple.shift == .@"0");
+                elf.shndx.rela_dyn.relaSetOffset(elf, rela_index, dest_vaddr);
                 elf.shndx.rela_dyn.relaSetAddend(elf, rela_index, target_val);
                 return;
             },
@@ -2122,34 +2119,14 @@ const NodeReloc = struct {
         }
     };
 
-    fn flushMovedNode(reloc: *NodeReloc, elf: *Elf, node_vaddr: u64) void {
-        if (reloc.rela_index.unwrap()) |rela_index| {
-            assert(elf.ehdrType() == .REL);
-            // The node has moved, so the offset of the relocation within the section might have
-            // changed, so update the `offset` field of the `ElfN.Rela` entry.
-            elf.getNodeShndx(reloc.node.unwrap().?).get(elf).rela.shndx.relaSetOffset(elf, rela_index, node_vaddr + reloc.offset);
-        } else {
-            assert(elf.ehdrType() != .REL);
-            reloc.apply(elf);
-        }
-    }
-
-    fn flushMovedTarget(reloc: *NodeReloc, elf: *Elf, target_section_offset: u64) void {
-        if (reloc.rela_index.unwrap()) |rela_index| {
-            assert(elf.ehdrType() == .REL);
-            // The target has moved, so the `addend` field of the `ElfN.Rela` entry needs to be updated.
-            elf.getNodeShndx(reloc.node.unwrap().?).get(elf).rela.shndx.relaSetAddend(elf, rela_index, target_section_offset +% @as(u64, @bitCast(reloc.addend)));
-        } else {
-            assert(elf.ehdrType() != .REL);
-            reloc.apply(elf);
-        }
-    }
-
     fn apply(reloc: *NodeReloc, elf: *Elf) void {
         const node = reloc.node.unwrap() orelse return; // deleted
         if (reloc.rela_index.unwrap()) |rela_index| {
             assert(elf.ehdrType() == .REL);
-            _ = rela_index;
+            // Ensure the output relocation is up-to-date.
+            const rela_shndx = elf.getNodeShndx(reloc.node.unwrap().?).get(elf).rela.shndx;
+            rela_shndx.relaSetOffset(elf, rela_index, elf.getNodeVAddr(node) + reloc.offset);
+            rela_shndx.relaSetAddend(elf, rela_index, elf.getNodeVAddr(node) +% @as(u64, @bitCast(reloc.addend)));
         } else {
             assert(elf.ehdrType() != .REL);
             if (node.hasMoved(&elf.mf) or reloc.target.hasMoved(&elf.mf)) {
@@ -4308,14 +4285,12 @@ const Symbol = struct {
         }
 
         fn applyTargetRelocs(sym_id: Symbol.Id, elf: *Elf) void {
-            if (elf.ehdrType() != .REL) {
-                var ri = sym_id.index(elf).ptr(elf).first_target_reloc;
-                while (ri != .none) {
-                    const reloc = ri.get(elf);
-                    assert(reloc.target == sym_id);
-                    reloc.apply(elf);
-                    ri = reloc.next;
-                }
+            var ri = sym_id.index(elf).ptr(elf).first_target_reloc;
+            while (ri != .none) {
+                const reloc = ri.get(elf);
+                assert(reloc.target == sym_id);
+                reloc.apply(elf);
+                ri = reloc.next;
             }
 
             if (elf.got.getIndex(.{ .symbol = sym_id })) |got_index| {
@@ -6623,43 +6598,6 @@ fn computeNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
     const offset, _ = ni.location(&elf.mf).resolve(&elf.mf);
     return parent_vaddr + offset;
 }
-fn computeNodeSectionOffset(elf: *Elf, ni: MappedFile.Node.Index) u64 {
-    const parent_ni = ni.parent(&elf.mf).unwrap().?;
-    const parent_section_offset = parent_section_offset: switch (elf.getNode(parent_ni)) {
-        .deleted,
-        .archive,
-        .archive_header,
-        .archive_input_member,
-        .archive_elf_member_header,
-        .elf,
-        .ehdr,
-        .shdr,
-        .segment,
-        => unreachable,
-        .section, .section_manual_size => 0,
-        .input_section, .copied_global => unreachable,
-        .nav, .uav, .lazy_code, .lazy_const_data => unreachable,
-        .debug_shared, .debug_addr, .eh_frame_footer, .debug_str_offsets, .unit_padding => unreachable,
-        .unit_frame, .unit_debug_info, .unit_debug_line => {
-            const parent_section_offset, _ = parent_ni.location(&elf.mf).resolve(&elf.mf);
-            break :parent_section_offset parent_section_offset;
-        },
-        .unit_frame_cie,
-        .unit_debug_info_header,
-        .unit_debug_info_footer,
-        .unit_debug_line_header,
-        .unit_debug_rnglists,
-        .const_debug_info,
-        .global_debug_info,
-        .func_frame_fde,
-        .func_debug_info,
-        .func_debug_line,
-        .decl_debug_info,
-        => unreachable,
-    };
-    const offset, _ = ni.location(&elf.mf).resolve(&elf.mf);
-    return parent_section_offset + offset;
-}
 fn computeNodeElfOffset(elf: *Elf, ni: MappedFile.Node.Index) u64 {
     return ni.fileLocation(&elf.mf, false).offset - elf.ni.elf.fileLocation(&elf.mf, false).offset;
 }
@@ -6801,7 +6739,6 @@ pub fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
 fn flushMovedNodeRelocs(
     elf: *Elf,
     node: MappedFile.Node.Index,
-    node_vaddr: u64,
     opts: struct {
         first_symbol_reloc: SymbolReloc.Index = .none,
         skip_symbol_relocs: MappedFile.Node.Index.Optional = .none,
@@ -6817,7 +6754,7 @@ fn flushMovedNodeRelocs(
                 if (reloc.node == opts.skip_symbol_relocs) continue;
                 break;
             }
-            reloc.flushMovedNode(elf, node_vaddr);
+            reloc.apply(elf);
         }
     }
 
@@ -6828,7 +6765,7 @@ fn flushMovedNodeRelocs(
                 if (reloc.node == opts.skip_node_relocs) continue;
                 break;
             }
-            reloc.flushMovedNode(elf, node_vaddr);
+            reloc.apply(elf);
         }
     }
 
@@ -9406,6 +9343,7 @@ fn addRelocAssumeCapacity(
                 .rela_index = rela_index.toOptional(),
                 .result = .ok,
             });
+            ri.get(elf).apply(elf);
         },
         .DYN, .EXEC => switch (elf.ehdrMachine()) {
             .AARCH64 => switch (@"type".AARCH64) {
@@ -11053,11 +10991,10 @@ pub fn idle(elf: *Elf) link.Error!bool {
             const idle_prog_node = elf.mf.update_prog_node.start(@tagName(Node.debug_addr), 0);
             defer idle_prog_node.end();
             const debug_addr_ni = elf.dwarf.debug_addr.ni.unwrap().?;
-            const debug_addr_vaddr = elf.getNodeVAddr(debug_addr_ni);
             for (elf.dwarf_addr.symbol_relocs.items[elf.dwarf_addr.pending_reloc_index..]) |symbol_ri| {
                 const symbol_reloc = symbol_ri.get(elf);
                 assert(symbol_reloc.node.unwrap().? == debug_addr_ni);
-                symbol_reloc.flushMovedNode(elf, debug_addr_vaddr);
+                symbol_reloc.apply(elf);
             }
             elf.dwarf_addr.pending_reloc_index = elf.dwarf_addr.symbol_relocs.items.len;
             break :task;
@@ -11066,11 +11003,10 @@ pub fn idle(elf: *Elf) link.Error!bool {
             const idle_prog_node = elf.mf.update_prog_node.start(@tagName(Node.debug_str_offsets), 0);
             defer idle_prog_node.end();
             const debug_str_offsets_ni = elf.dwarf.debug_str_offsets.ni.unwrap().?;
-            const debug_str_offsets_vaddr = elf.getNodeVAddr(debug_str_offsets_ni);
             for (elf.dwarf_str_offsets.node_relocs.items[elf.dwarf_str_offsets.pending_reloc_index..]) |node_ri| {
                 const node_reloc = node_ri.get(elf);
                 assert(node_reloc.node.unwrap().? == debug_str_offsets_ni);
-                node_reloc.flushMovedNode(elf, debug_str_offsets_vaddr);
+                node_reloc.apply(elf);
             }
             elf.dwarf_str_offsets.pending_reloc_index = elf.dwarf_str_offsets.node_relocs.items.len;
             break :task;
@@ -11565,7 +11501,7 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                     reloc.apply(elf);
                 }
             } else if (shndx == elf.shndx.plt) {
-                elf.flushMovedNodeRelocs(ni, addr, .{
+                elf.flushMovedNodeRelocs(ni, .{
                     .first_symbol_reloc = elf.plt_first_symbol_reloc,
                 });
                 elf.flushMovedPltSection(.plt, old_addr, addr);
@@ -11574,7 +11510,7 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
             } else if (shndx == elf.shndx.plt_sec) {
                 elf.flushMovedPltSection(.plt_sec, old_addr, addr);
             } else if (shndx == elf.shndx.eh_frame_hdr) {
-                elf.flushMovedNodeRelocs(ni, addr, .{
+                elf.flushMovedNodeRelocs(ni, .{
                     .first_symbol_reloc = elf.eh_frame_hdr_first_symbol_reloc,
                 });
             }
@@ -11627,7 +11563,7 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                 }
             }
 
-            elf.flushMovedNodeRelocs(ni, new_section_addr, .{
+            elf.flushMovedNodeRelocs(ni, .{
                 .first_symbol_reloc = isi.ptrConst(elf).first_symbol_reloc,
                 .first_got_reloc = isi.ptrConst(elf).first_got_reloc,
             });
@@ -11650,7 +11586,7 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                     Symbol.Id.global(gsi).flushMoved(elf, new_addr);
                 }
             }
-            elf.flushMovedNodeRelocs(ni, new_addr, .{
+            elf.flushMovedNodeRelocs(ni, .{
                 .first_symbol_reloc = mi.firstSymbolReloc(elf),
                 .skip_symbol_relocs = switch (tag) {
                     else => comptime unreachable,
@@ -11664,12 +11600,11 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
             });
         },
         .debug_shared => |ss| {
-            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = elf.dwarf_shared.getPtr(ss).first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.flushMovedTarget(elf, target_section_offset);
+                target_reloc.apply(elf);
                 target_ri = target_reloc.next;
             }
         },
@@ -11680,121 +11615,110 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
         .unit_debug_line,
         => {},
         .debug_addr => {
-            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = elf.dwarf_addr.first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.flushMovedTarget(elf, target_section_offset);
+                target_reloc.apply(elf);
                 target_ri = target_reloc.next;
             }
-            const node_vaddr = elf.computeNodeVAddr(ni);
             for (elf.dwarf_addr.symbol_relocs.items) |symbol_ri| {
                 const symbol_reloc = symbol_ri.get(elf);
                 assert(symbol_reloc.node.unwrap().? == ni);
-                symbol_reloc.flushMovedNode(elf, node_vaddr);
+                symbol_reloc.apply(elf);
             }
             elf.dwarf_addr.pending_reloc_index = elf.dwarf_addr.symbol_relocs.items.len;
         },
         .debug_str_offsets => {
-            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = elf.dwarf_str_offsets.first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.flushMovedTarget(elf, target_section_offset);
+                target_reloc.apply(elf);
                 target_ri = target_reloc.next;
             }
-            const node_vaddr = elf.computeNodeVAddr(ni);
             for (elf.dwarf_str_offsets.node_relocs.items) |node_ri| {
                 const node_reloc = node_ri.get(elf);
                 assert(node_reloc.node.unwrap().? == ni);
-                node_reloc.flushMovedNode(elf, node_vaddr);
+                node_reloc.apply(elf);
             }
             elf.dwarf_str_offsets.pending_reloc_index = elf.dwarf_str_offsets.node_relocs.items.len;
         },
         .unit_frame_cie => |ui| {
-            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = elf.dwarf_units[@backingInt(ui)].frame_cie_first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.flushMovedTarget(elf, target_section_offset);
+                target_reloc.apply(elf);
                 target_ri = target_reloc.next;
             }
         },
         .unit_debug_info_header => |ui| {
             const dwarf_unit = &elf.dwarf_units[@backingInt(ui)];
-            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = dwarf_unit.debug_info_header_first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.flushMovedTarget(elf, target_section_offset);
+                target_reloc.apply(elf);
                 target_ri = target_reloc.next;
             }
-            elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
+            elf.flushMovedNodeRelocs(ni, .{
                 .first_node_reloc = dwarf_unit.debug_info_header_first_node_reloc,
             });
         },
         .unit_debug_info_footer => {},
         .unit_debug_line_header => |ui| {
             const dwarf_unit = &elf.dwarf_units[@backingInt(ui)];
-            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = dwarf_unit.debug_line_header_first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.flushMovedTarget(elf, target_section_offset);
+                target_reloc.apply(elf);
                 target_ri = target_reloc.next;
             }
-            elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
+            elf.flushMovedNodeRelocs(ni, .{
                 .first_node_reloc = dwarf_unit.debug_line_header_first_node_reloc,
             });
         },
         .unit_debug_rnglists => |ui| {
             const dwarf_unit = &elf.dwarf_units[@backingInt(ui)];
-            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = dwarf_unit.debug_rnglists_first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.flushMovedTarget(elf, target_section_offset);
+                target_reloc.apply(elf);
                 target_ri = target_reloc.next;
             }
-            const node_vaddr = elf.computeNodeVAddr(ni);
             for (dwarf_unit.debug_rnglists_symbol_relocs.items) |symbol_ri| {
                 const symbol_reloc = symbol_ri.get(elf);
                 assert(symbol_reloc.node.unwrap().? == ni);
-                symbol_reloc.flushMovedNode(elf, node_vaddr);
+                symbol_reloc.apply(elf);
             }
         },
         .const_debug_info => |cpi| {
             const dwarf_const = &elf.dwarf_consts.get(cpi).?;
-            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = dwarf_const.debug_info_first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.flushMovedTarget(elf, target_section_offset);
+                target_reloc.apply(elf);
                 target_ri = target_reloc.next;
             }
-            elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
+            elf.flushMovedNodeRelocs(ni, .{
                 .first_symbol_reloc = dwarf_const.debug_info_first_symbol_reloc,
                 .first_node_reloc = dwarf_const.debug_info_first_node_reloc,
             });
         },
         .global_debug_info => |gi| {
             const dwarf_global = &elf.dwarf_globals.items[@backingInt(gi)];
-            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = dwarf_global.debug_info_first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.flushMovedTarget(elf, target_section_offset);
+                target_reloc.apply(elf);
                 target_ri = target_reloc.next;
             }
-            elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
+            elf.flushMovedNodeRelocs(ni, .{
                 .first_symbol_reloc = dwarf_global.debug_info_first_symbol_reloc,
                 .first_node_reloc = dwarf_global.debug_info_first_node_reloc,
             });
@@ -11810,22 +11734,21 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                     elf.dwarf.updateEhFrameFde(ni.slice(&elf.mf), offset);
                 },
             }
-            elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
+            elf.flushMovedNodeRelocs(ni, .{
                 .first_symbol_reloc = dwarf_func.frame_fde_first_symbol_reloc,
                 .first_node_reloc = dwarf_func.frame_fde_first_node_reloc,
             });
         },
         .func_debug_info => |fi| {
             const dwarf_func = &elf.dwarf_funcs.items[@backingInt(fi)];
-            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = dwarf_func.debug_info_first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.flushMovedTarget(elf, target_section_offset);
+                target_reloc.apply(elf);
                 target_ri = target_reloc.next;
             }
-            elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
+            elf.flushMovedNodeRelocs(ni, .{
                 .first_symbol_reloc = dwarf_func.debug_info_first_symbol_reloc,
                 .skip_symbol_relocs = if (elf.navs.getPtr(fi.nav(&elf.dwarf))) |nav|
                     nav.lsi.index().ptr(elf).node
@@ -11837,7 +11760,7 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
         },
         .func_debug_line => |fi| {
             const dwarf_func = &elf.dwarf_funcs.items[@backingInt(fi)];
-            elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
+            elf.flushMovedNodeRelocs(ni, .{
                 .first_symbol_reloc = dwarf_func.debug_line_first_symbol_reloc,
                 .first_node_reloc = dwarf_func.debug_line_first_node_reloc,
                 .skip_node_relocs = fi.get(&elf.dwarf).debug_info_ni,
@@ -11845,15 +11768,14 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
         },
         .decl_debug_info => |di| {
             const dwarf_decl = &elf.dwarf_decls.get(di).?;
-            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = dwarf_decl.debug_info_first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.flushMovedTarget(elf, target_section_offset);
+                target_reloc.apply(elf);
                 target_ri = target_reloc.next;
             }
-            elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
+            elf.flushMovedNodeRelocs(ni, .{
                 .first_node_reloc = dwarf_decl.debug_info_first_node_reloc,
             });
         },
