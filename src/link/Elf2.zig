@@ -1073,10 +1073,14 @@ const dwarf_relocs = struct {
     const Addr = struct {
         first_target_reloc: NodeReloc.Index,
         symbol_relocs: std.ArrayList(SymbolReloc.Index),
+        /// Index into `symbol_relocs`.
+        pending_reloc_index: usize,
     };
     const StrOffsets = struct {
         first_target_reloc: NodeReloc.Index,
         node_relocs: std.ArrayList(NodeReloc.Index),
+        /// Index into `node_relocs`.
+        pending_reloc_index: usize,
     };
     const Unit = struct {
         frame_cie_first_target_reloc: NodeReloc.Index,
@@ -5000,10 +5004,12 @@ fn create(
         .dwarf_addr = .{
             .first_target_reloc = .none,
             .symbol_relocs = .empty,
+            .pending_reloc_index = 0,
         },
         .dwarf_str_offsets = .{
             .first_target_reloc = .none,
             .node_relocs = .empty,
+            .pending_reloc_index = 0,
         },
         .dwarf_units = &.{},
         .dwarf_consts = .empty,
@@ -11010,6 +11016,9 @@ pub fn idle(elf: *Elf) link.Error!bool {
         if (elf.bss_moved) {
             elf.bss_moved = false;
 
+            const idle_prog_node = elf.mf.update_prog_node.start(".bss", 0);
+            defer idle_prog_node.end();
+
             const data_phndx = elf.getNode(elf.ni.data).segment;
             const data_offset: u64, const data_vaddr: u64, const data_filesz: u64 = switch (elf.phdrSlice()) {
                 inline else => |phdr| .{
@@ -11040,6 +11049,32 @@ pub fn idle(elf: *Elf) link.Error!bool {
 
             break :task;
         }
+        if (elf.dwarf_addr.pending_reloc_index < elf.dwarf_addr.symbol_relocs.items.len) {
+            const idle_prog_node = elf.mf.update_prog_node.start(@tagName(Node.debug_addr), 0);
+            defer idle_prog_node.end();
+            const debug_addr_ni = elf.dwarf.debug_addr.ni.unwrap().?;
+            const debug_addr_vaddr = elf.getNodeVAddr(debug_addr_ni);
+            for (elf.dwarf_addr.symbol_relocs.items[elf.dwarf_addr.pending_reloc_index..]) |symbol_ri| {
+                const symbol_reloc = symbol_ri.get(elf);
+                assert(symbol_reloc.node.unwrap().? == debug_addr_ni);
+                symbol_reloc.flushMovedNode(elf, debug_addr_vaddr);
+            }
+            elf.dwarf_addr.pending_reloc_index = elf.dwarf_addr.symbol_relocs.items.len;
+            break :task;
+        }
+        if (elf.dwarf_str_offsets.pending_reloc_index < elf.dwarf_str_offsets.node_relocs.items.len) {
+            const idle_prog_node = elf.mf.update_prog_node.start(@tagName(Node.debug_str_offsets), 0);
+            defer idle_prog_node.end();
+            const debug_str_offsets_ni = elf.dwarf.debug_str_offsets.ni.unwrap().?;
+            const debug_str_offsets_vaddr = elf.getNodeVAddr(debug_str_offsets_ni);
+            for (elf.dwarf_str_offsets.node_relocs.items[elf.dwarf_str_offsets.pending_reloc_index..]) |node_ri| {
+                const node_reloc = node_ri.get(elf);
+                assert(node_reloc.node.unwrap().? == debug_str_offsets_ni);
+                node_reloc.flushMovedNode(elf, debug_str_offsets_vaddr);
+            }
+            elf.dwarf_str_offsets.pending_reloc_index = elf.dwarf_str_offsets.node_relocs.items.len;
+            break :task;
+        }
     }
     if (elf.inputs.items.len - elf.input_pending_index > 0) return true;
     if (elf.input_sections.items.len - elf.input_section_pending_index > 0) return true;
@@ -11047,6 +11082,8 @@ pub fn idle(elf: *Elf) link.Error!bool {
     if (elf.changed_symtab_index.count() > 0) return true;
     if (elf.mf.updates.items.len > 0) return true;
     if (elf.bss_moved) return true;
+    if (elf.dwarf_addr.pending_reloc_index < elf.dwarf_addr.symbol_relocs.items.len) return true;
+    if (elf.dwarf_str_offsets.pending_reloc_index < elf.dwarf_str_offsets.node_relocs.items.len) return true;
     return false;
 }
 
@@ -11177,7 +11214,6 @@ fn genPending(elf: *Elf, pt: Zcu.PerThread) link.Error!void {
 fn genPendingDebug(elf: *Elf, gpa: std.mem.Allocator) link.Error!void {
     while (elf.dwarf.debug_addr.map.count() - elf.dwarf.debug_addr.pending_index > 0) {
         const debug_addr_ni = elf.dwarf.debug_addr.ni.unwrap().?;
-        try debug_addr_ni.moved(gpa, &elf.mf);
         var da_nw: link.MappedFile.Node.Writer = undefined;
         debug_addr_ni.writer(gpa, &elf.mf, &da_nw);
         defer da_nw.deinit();
@@ -11190,7 +11226,6 @@ fn genPendingDebug(elf: *Elf, gpa: std.mem.Allocator) link.Error!void {
     }
     while (elf.dwarf.debug_str_offsets.map.count() - elf.dwarf.debug_str_offsets.pending_index > 0) {
         const debug_str_offsets_ni = elf.dwarf.debug_str_offsets.ni.unwrap().?;
-        try debug_str_offsets_ni.moved(gpa, &elf.mf);
         var dso_nw: link.MappedFile.Node.Writer = undefined;
         debug_str_offsets_ni.writer(gpa, &elf.mf, &dso_nw);
         defer dso_nw.deinit();
@@ -11659,6 +11694,7 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                 assert(symbol_reloc.node.unwrap().? == ni);
                 symbol_reloc.flushMovedNode(elf, node_vaddr);
             }
+            elf.dwarf_addr.pending_reloc_index = elf.dwarf_addr.symbol_relocs.items.len;
         },
         .debug_str_offsets => {
             const target_section_offset = elf.computeNodeSectionOffset(ni);
@@ -11675,6 +11711,7 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                 assert(node_reloc.node.unwrap().? == ni);
                 node_reloc.flushMovedNode(elf, node_vaddr);
             }
+            elf.dwarf_str_offsets.pending_reloc_index = elf.dwarf_str_offsets.node_relocs.items.len;
         },
         .unit_frame_cie => |ui| {
             const target_section_offset = elf.computeNodeSectionOffset(ni);
