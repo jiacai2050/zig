@@ -308,9 +308,6 @@ const Node = union(enum) {
     /// emitted a copy relocation.
     ///
     /// TODO it would be better to emit these into `.bss` or `.bss.rel.ro`, once we support those.
-    ///
-    /// TODO: currently, the `elf.copied_globals` entry may not be there---this case exists because
-    /// `MappedFile` does not (yet?) support deleting nodes. See logic in `updateGlobalDynamic`.
     copied_global: Symbol.Global.Index,
     /// May contain relocations.
     nav: NavMapIndex,
@@ -3335,10 +3332,8 @@ fn updateGlobalDynamic(elf: *Elf, orig_gsi: Symbol.Global.Index, force_apply_rel
     } else {
         if (elf.copied_globals.fetchSwapRemove(gsi)) |copied_global_kv| {
             // We previously made a copy relocation, but now have deemed it unnecessary.
+            try elf.deleteNode(copied_global_kv.value.node);
             elf.shndx.rela_dyn.relaDeleteOne(elf, copied_global_kv.value.rela_index);
-            // TODO: once `MappedFile` has a way to delete a node (so it can re-use the
-            // space), we should delete `copied_global_kv.value.node`, which is an
-            // "orphaned" `copied_global` node.
             apply_relocs = true;
         }
     }
@@ -3613,10 +3608,8 @@ fn deleteOwnedDynsym(elf: *Elf, gsi: Symbol.Global.Index) std.mem.Allocator.Erro
 
     var apply_relocs: bool = false;
     if (elf.copied_globals.fetchSwapRemove(gsi)) |copied_global_kv| {
+        try elf.deleteNode(copied_global_kv.value.node);
         elf.shndx.rela_dyn.relaDeleteOne(elf, copied_global_kv.value.rela_index);
-        // TODO: once `MappedFile` has a way to delete a node (so it can re-use the
-        // space), we should delete `copied_global_kv.value.node`, which is an
-        // "orphaned" `copied_global` node.
         apply_relocs = true;
     }
     if (elf.plt.getIndex(gsi)) |plt_index| {
@@ -11444,11 +11437,7 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
             });
         },
         .copied_global => |global_name| {
-            const copied_global = elf.copied_globals.getPtr(global_name) orelse {
-                // TODO: this node is orphaned, which is possible because `MappedFile` does not yet
-                // support deleting nodes. See logic in `updateGlobalDynamic`.
-                return;
-            };
+            const copied_global = elf.copied_globals.getPtr(global_name).?;
             assert(copied_global.node == ni);
 
             const new_addr = elf.computeNodeVAddr(ni);
@@ -13008,11 +12997,9 @@ pub fn addNodeAssumeCapacity(elf: *Elf, ni: MappedFile.Node.Index, node: Node) M
     return ni;
 }
 
-fn deleteNode(elf: *Elf, node: *MappedFile.Node.Index.Optional) std.mem.Allocator.Error!void {
-    const ni = node.unwrap().?;
-    try ni.delete(elf.base.comp.gpa, &elf.mf);
-    elf.nodes.set(@backingInt(ni), .deleted);
-    node.* = .none;
+fn deleteNode(elf: *Elf, node: MappedFile.Node.Index) std.mem.Allocator.Error!void {
+    try node.delete(elf.base.comp.gpa, &elf.mf);
+    elf.nodes.set(@backingInt(node), .deleted);
 }
 
 /// If `sym` has a PLT entry, returns the address of that entry (specifically, the address which a
