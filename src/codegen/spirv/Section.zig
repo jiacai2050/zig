@@ -14,6 +14,38 @@ ids: std.bit_set.Dynamic,
 
 pub const empty: Section = .{ .instructions = .empty, .ids = .{} };
 
+pub const InstructionIterator = struct {
+    words: []const Word,
+    offset: usize = 0,
+
+    pub const Instruction = struct {
+        opcode: Opcode,
+        words: []const Word,
+        start: usize,
+        end: usize,
+        result_id: Id,
+    };
+
+    pub fn next(it: *InstructionIterator) ?Instruction {
+        if (it.offset >= it.words.len) return null;
+        const start = it.offset;
+        const header: InstructionHeader = @bitCast(it.words[start]);
+        const words = it.words[start..][0..header.word_count];
+        it.offset += words.len;
+        return .{
+            .opcode = header.opcode,
+            .words = words,
+            .start = start,
+            .end = it.offset,
+            .result_id = if (header.opcode.resultIndex()) |i| @fromBackingInt(words[i]) else .none,
+        };
+    }
+};
+
+pub fn iterate(section: *const Section) InstructionIterator {
+    return .{ .words = section.instructions.items };
+}
+
 pub const Error = error{
     OutOfMemory,
     UnknownOpcode,

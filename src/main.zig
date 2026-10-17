@@ -3582,7 +3582,7 @@ fn buildOutputType(
         @import("codegen/llvm/bindings.zig").ParseCommandLineOptions(argv.len, &argv);
     }
 
-    if (build_options.have_llvm and create_module.resolved_options.use_llvm and target.cpu.arch.isSpirV()) {
+    if (build_options.have_llvm and create_module.resolved_options.use_llvm and target.cpu.arch.isSpirv()) {
         // LLVM has no way to set this non-globally other
         // than SPIRVTranslate() but it cannot emits assembly.
         var extensions: std.ArrayList(u8) = .empty;

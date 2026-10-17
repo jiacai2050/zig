@@ -310,7 +310,7 @@ pub fn hasNewLinker(ofmt: std.Target.ObjectFormat) bool {
 /// than or equal to the number of behavior tests as the respective LLVM backend.
 pub fn selfHostedBackendIsAsRobustAsLlvm(target: *const std.Target) bool {
     if (comptime builtin.cpu.arch.endian() == .big) return false; // https://github.com/ziglang/zig/issues/25961
-    if (target.cpu.arch.isSpirV()) return true;
+    if (target.cpu.arch.isSpirv()) return true;
     if (target.cpu.arch == .x86_64 and target.ptrBitWidth() == 64) {
         if (target.os.tag == .illumos) {
             // https://github.com/ziglang/zig/issues/25699

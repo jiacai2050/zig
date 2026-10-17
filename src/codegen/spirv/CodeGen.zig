@@ -13,7 +13,6 @@ next_result_id: Word = 1,
 navs: std.array_hash_map.Auto(InternPool.Nav.Index, Id) = .empty,
 externs: std.array_hash_map.Auto(InternPool.Nav.Index, Mir.Extern) = .empty,
 entry_points: std.ArrayList(Mir.EntryPoint) = .empty,
-error_buffer: ?Id = null,
 struct_types: std.array_hash_map.Custom(StructType, Id, StructType.HashContext, true) = .empty,
 /// SPIR-V ids of OpVariables whose pointee is a Block struct
 block_var_ids: std.AutoHashMapUnmanaged(Id, void) = .empty,
@@ -202,9 +201,7 @@ pub fn generate(
     defer cg.deinit();
 
     const return_ty_id = try cg.resolveFnReturnType(.fromInterned(fn_info.return_type));
-    const is_test = zcu.test_functions.contains(nav_index);
     const nav_id = try cg.resolveNav(nav_index);
-    const function_id = if (is_test) cg.allocId() else nav_id;
 
     try cg.args.ensureUnusedCapacity(gpa, fn_info.param_types.len);
     for (fn_info.param_types.get(ip)) |param_ty_index| {
@@ -224,7 +221,7 @@ pub fn generate(
     const fn_ty_id = try cg.functionType(return_ty_id, cg.args.items(.ty));
     try cg.module.emit(gpa, .OpFunction, .{
         .id_result_type = return_ty_id,
-        .id_result = function_id,
+        .id_result = nav_id,
         .function_control = .{},
         .function_type = fn_ty_id,
     });
@@ -236,8 +233,7 @@ pub fn generate(
     }
     try cg.module.append(gpa, cg.prologue);
     try cg.module.append(gpa, cg.body);
-    if (is_test) try cg.generateTestEntryPoint(nav.fqn.toSlice(ip), nav_id, function_id);
-    try cg.debugName(function_id, nav.fqn.toSlice(ip));
+    try cg.debugName(nav_id, nav.fqn.toSlice(ip));
 
     return cg.toOwnedMir();
 }
@@ -3781,149 +3777,6 @@ fn buildWideMul(
 }
 
 /// The SPIR-V backend is not yet advanced enough to support the std testing infrastructure.
-/// In order to be able to run tests, we "temporarily" lower test kernels into separate entry-
-/// points. The test executor will then be able to invoke these to run the tests.
-/// Note that tests are lowered according to std.lang.TestFn, which is `fn () anyerror!void`.
-/// (anyerror!void has the same layout as anyerror).
-/// Each test declaration generates a function like.
-///   %anyerror = OpTypeInt 0 16
-///   %p_invocation_globals_struct_ty = ...
-///   %p_anyerror = OpTypePointer CrossWorkgroup %anyerror
-///   %K = OpTypeFunction %void %p_invocation_globals_struct_ty %p_anyerror
-///
-///   %test = OpFunction %void %K
-///   %p_invocation_globals = OpFunctionParameter p_invocation_globals_struct_ty
-///   %p_err = OpFunctionParameter %p_anyerror
-///   %lbl = OpLabel
-///   %result = OpFunctionCall %anyerror %func %p_invocation_globals
-///   OpStore %p_err %result
-///   OpFunctionEnd
-/// TODO is to also write out the error as a function call parameter, and to somehow fetch
-/// the name of an error in the text executor.
-fn generateTestEntryPoint(
-    cg: *CodeGen,
-    name: []const u8,
-    kernel_id: Id,
-    test_id: Id,
-) !void {
-    const gpa = cg.gpa;
-    const zcu = cg.zcu;
-    const target = cg.zcu.getTarget();
-
-    const anyerror_ty_id = try cg.resolveType(.anyerror, .direct);
-    const ptr_anyerror_ty = try cg.pt.ptrType(.{
-        .child = .anyerror_type,
-        .flags = .{ .address_space = .storage_buffer },
-    });
-    const ptr_anyerror_ty_id = try cg.resolveType(ptr_anyerror_ty, .direct);
-
-    var section: Section = .empty;
-    defer section.deinit(gpa);
-
-    const p_error_id = cg.allocId();
-    switch (target.os.tag) {
-        .opencl, .amdhsa => {
-            const void_ty_id = try cg.resolveType(.void, .direct);
-            const kernel_proto_ty_id = try cg.functionType(void_ty_id, &.{ptr_anyerror_ty_id});
-
-            try section.emit(gpa, .OpFunction, .{
-                .id_result_type = try cg.resolveType(.void, .direct),
-                .id_result = kernel_id,
-                .function_control = .{},
-                .function_type = kernel_proto_ty_id,
-            });
-
-            try section.emit(gpa, .OpFunctionParameter, .{
-                .id_result_type = ptr_anyerror_ty_id,
-                .id_result = p_error_id,
-            });
-
-            try section.emit(gpa, .OpLabel, .{
-                .id_result = cg.allocId(),
-            });
-        },
-        .vulkan, .opengl => {
-            if (cg.error_buffer == null) {
-                const buffer_struct_ty_id = cg.allocId();
-                try cg.module.emit(gpa, .OpTypeStruct, .{
-                    .id_result = buffer_struct_ty_id,
-                    .id_ref = &.{anyerror_ty_id},
-                });
-                try cg.memberDebugName(buffer_struct_ty_id, 0, "error_out");
-                try cg.decorate(buffer_struct_ty_id, .block);
-                try cg.decorateMember(buffer_struct_ty_id, 0, .{ .offset = .{ .byte_offset = 0 } });
-
-                const ptr_buffer_struct_ty_id = cg.allocId();
-                try cg.module.emit(gpa, .OpTypePointer, .{
-                    .id_result = ptr_buffer_struct_ty_id,
-                    .storage_class = cg.storageClass(.storage_buffer),
-                    .type = buffer_struct_ty_id,
-                });
-
-                const error_buffer_id = cg.allocId();
-                cg.error_buffer = error_buffer_id;
-                try cg.module.emit(gpa, .OpVariable, .{
-                    .id_result_type = ptr_buffer_struct_ty_id,
-                    .id_result = error_buffer_id,
-                    .storage_class = cg.storageClass(.storage_buffer),
-                });
-                try cg.decorate(error_buffer_id, .{ .descriptor_set = .{ .descriptor_set = 0 } });
-                try cg.decorate(error_buffer_id, .{ .binding = .{ .binding_point = 0 } });
-            }
-
-            const void_ty_id = try cg.resolveType(.void, .direct);
-            const kernel_proto_ty_id = try cg.functionType(void_ty_id, &.{});
-            try section.emit(gpa, .OpFunction, .{
-                .id_result_type = try cg.resolveType(.void, .direct),
-                .id_result = kernel_id,
-                .function_control = .{},
-                .function_type = kernel_proto_ty_id,
-            });
-            try section.emit(gpa, .OpLabel, .{
-                .id_result = cg.allocId(),
-            });
-
-            const buffer_id = cg.error_buffer.?;
-            const zero_id = try cg.constInt(.u32, 0);
-            try section.emit(gpa, .OpInBoundsAccessChain, .{
-                .id_result_type = ptr_anyerror_ty_id,
-                .id_result = p_error_id,
-                .base = buffer_id,
-                .indexes = &.{zero_id},
-            });
-        },
-        else => unreachable,
-    }
-
-    const error_id = cg.allocId();
-    try section.emit(gpa, .OpFunctionCall, .{
-        .id_result_type = anyerror_ty_id,
-        .id_result = error_id,
-        .function = test_id,
-    });
-    // Note: Convert to direct not required.
-    try section.emit(gpa, .OpStore, .{
-        .pointer = p_error_id,
-        .object = error_id,
-        .memory_access = .{
-            .aligned = .{ .literal_integer = @intCast(Type.abiAlignment(.anyerror, zcu).toByteUnits().?) },
-        },
-    });
-    try section.emit(gpa, .OpReturn, {});
-    try section.emit(gpa, .OpFunctionEnd, {});
-    try cg.module.append(gpa, section);
-
-    // Just generate a quick other name because the intel runtime crashes when the entry-
-    // point name is the same as a different OpName.
-    const test_name = try std.fmt.allocPrint(gpa, "test {s}", .{name});
-    errdefer gpa.free(test_name);
-    try cg.entry_points.append(gpa, .{
-        .id = kernel_id,
-        .name = test_name,
-        .cc = .{ .spirv_kernel = .{ .x = 1, .y = 1, .z = 1 } },
-    });
-}
-
 fn intFromBool(cg: *CodeGen, value: Temporary, result_ty: Type) !Temporary {
     const zero_id = try cg.constInt(result_ty, 0);
     const one_id = try cg.constInt(result_ty, 1);

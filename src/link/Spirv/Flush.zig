@@ -18,11 +18,12 @@ const Flush = @This();
 linker: *Linker,
 arena: Allocator,
 id_bound: Word,
+nonsemantic_info: bool,
 navs: std.array_hash_map.Auto(InternPool.Nav.Index, Id),
 symbols: std.array_hash_map.String(Symbol),
 interned: std.array_hash_map.String(Id),
 variables: std.array_hash_map.Auto(Id, spec.StorageClass),
-function_references: std.array_hash_map.Auto(Id, []const Id),
+fn_refs: std.array_hash_map.Auto(Id, []const Id),
 entry_points: std.ArrayList(Mir.EntryPoint),
 deps: std.ArrayList(Id),
 scratch: Section,
@@ -35,7 +36,6 @@ decorations: Section,
 globals: Section,
 declarations: Section,
 functions: Section,
-nonsemantic_info: bool = false,
 
 const Symbol = struct {
     id: Id,
@@ -195,7 +195,6 @@ pub fn emitModule(flush: *Flush, out: *Section) link.Error!void {
     }) |feature| {
         if (target.cpu.has(.spirv, feature)) version.minor += 1;
     }
-
     const zig_packed_version = (zig_version.major << 12) | (zig_version.minor << 7) | zig_version.patch;
     const header: spec.Header = .{
         .magic = spec.magic_number,
@@ -204,6 +203,7 @@ pub fn emitModule(flush: *Flush, out: *Section) link.Error!void {
         .id_bound = flush.id_bound,
         .schema = 0,
     };
+
     try out.writeWords(gpa, @ptrCast(@alignCast(&header)));
     try flush.emitCapabilities(out);
     try out.writeWords(gpa, flush.extended_instruction_sets.instructions.items);
@@ -227,7 +227,6 @@ fn load(flush: *Flush, mir: *const Mir, path: ?Path) link.Error!void {
     const arena = flush.arena;
     const diags = &comp.link_diags;
     const target = &comp.root_mod.resolved_target.result;
-
     const ids = try gpa.alloc(Id, mir.id_bound);
     defer gpa.free(ids);
     ids[0] = .none;
@@ -258,19 +257,16 @@ fn load(flush: *Flush, mir: *const Mir, path: ?Path) link.Error!void {
         try imports.put(gpa, @backingInt(ext.id), @intCast(gop.index));
     }
 
-    const words = mir.module.instructions.items;
-    var offset: usize = 0;
-    while (offset < words.len) {
-        const start = offset;
-        const header: spec.InstructionHeader = @bitCast(words[start]);
-        const inst = words[start..][0..header.word_count];
-        offset += inst.len;
+    var it = mir.module.iterate();
+    while (it.next()) |inst| {
+        const opcode = inst.opcode;
+        const words = inst.words;
 
-        if (header.opcode == .OpDecorate) {
-            const target_id = inst[1];
-            const decoration: spec.Decoration = @fromBackingInt(inst[2]);
+        if (opcode == .OpDecorate) {
+            const target_id = words[1];
+            const decoration: spec.Decoration = @fromBackingInt(words[2]);
             if (decoration == .linkage_attributes) {
-                const parameters = inst[3..];
+                const parameters = words[3..];
                 const name_words = parameters[0 .. parameters.len - 1];
                 const name = std.mem.sliceTo(std.mem.sliceAsBytes(name_words), 0);
                 const linkage: spec.LinkageType = @fromBackingInt(parameters[parameters.len - 1]);
@@ -299,19 +295,19 @@ fn load(flush: *Flush, mir: *const Mir, path: ?Path) link.Error!void {
             }
         }
 
-        const class = header.opcode.class();
-        const target_id: Word = switch (header.opcode) {
-            .OpName, .OpMemberName => inst[1],
+        const class = opcode.class();
+        const target_id: Word = switch (opcode) {
+            .OpName, .OpMemberName => words[1],
             .OpDecorationGroup, .OpGroupDecorate, .OpGroupMemberDecorate => {
                 return diags.failParse(path.?, "decoration groups are not supported", .{});
             },
-            else => if (class == .annotation) inst[1] else continue,
+            else => if (class == .annotation) words[1] else continue,
         };
         try annotations.append(gpa, .{
             .target_id = target_id,
             .class = class,
-            .start = start,
-            .end = offset,
+            .start = inst.start,
+            .end = inst.end,
         });
     }
 
@@ -336,19 +332,19 @@ fn load(flush: *Flush, mir: *const Mir, path: ?Path) link.Error!void {
         }
     }
 
-    offset = 0;
-    while (offset < words.len) {
-        const start = offset;
-        const header: spec.InstructionHeader = @bitCast(words[start]);
-        const inst = words[start..][0..header.word_count];
-        offset += inst.len;
+    it = mir.module.iterate();
+    while (it.next()) |inst| {
+        const start = inst.start;
+        var end = inst.end;
+        const opcode = inst.opcode;
+        const words = inst.words;
         input.mark += 1;
         flush.deps.clearRetainingCapacity();
 
-        const result_index = header.opcode.resultIndex() orelse switch (header.opcode) {
+        const result_index = opcode.resultIndex() orelse switch (opcode) {
             .OpCapability => {
-                const capability = std.enums.fromInt(spec.Capability, inst[1]) orelse {
-                    return diags.failParse(path.?, "unknown capability '{d}'", .{inst[1]});
+                const capability = std.enums.fromInt(spec.Capability, words[1]) orelse {
+                    return diags.failParse(path.?, "unknown capability '{d}'", .{words[1]});
                 };
 
                 // TODO: this isn't a full validation. we probably have to automate this
@@ -368,7 +364,7 @@ fn load(flush: *Flush, mir: *const Mir, path: ?Path) link.Error!void {
                 continue;
             },
             .OpExtension => {
-                const name = std.mem.sliceTo(std.mem.sliceAsBytes(inst[1..]), 0);
+                const name = std.mem.sliceTo(std.mem.sliceAsBytes(words[1..]), 0);
                 if (std.mem.eql(u8, name, "SPV_KHR_non_semantic_info")) {
                     flush.nonsemantic_info = true;
                     continue;
@@ -388,34 +384,31 @@ fn load(flush: *Flush, mir: *const Mir, path: ?Path) link.Error!void {
                 continue;
             },
             .OpEntryPoint => {
-                try input.copy(flush, &flush.object_entry_points, start, offset, null);
+                try input.copy(flush, &flush.object_entry_points, start, end, null);
                 continue;
             },
             .OpExecutionMode, .OpExecutionModeId => {
-                try input.copy(flush, &flush.object_execution_modes, start, offset, null);
+                try input.copy(flush, &flush.object_execution_modes, start, end, null);
                 continue;
             },
             .OpTypeForwardPointer => {
-                forward_pointers.set(inst[1]);
-                try input.copy(flush, &flush.globals, start, offset, null);
+                forward_pointers.set(words[1]);
+                try input.copy(flush, &flush.globals, start, end, null);
                 continue;
             },
             else => continue,
         };
 
-        const result_id = inst[result_index];
+        const result_id = words[result_index];
         result_ids.clearRetainingCapacity();
         try result_ids.append(gpa, result_id);
 
         var has_body = false;
-        if (header.opcode == .OpFunction) {
-            while (true) {
-                const body: spec.InstructionHeader = @bitCast(words[offset]);
+        if (opcode == .OpFunction) {
+            while (it.next()) |body| {
+                end = body.end;
                 if (body.opcode == .OpLabel) has_body = true;
-                if (body.opcode.resultIndex()) |index| {
-                    try result_ids.append(gpa, words[offset + index]);
-                }
-                offset += body.word_count;
+                if (body.result_id != .none) try result_ids.append(gpa, @backingInt(body.result_id));
                 if (body.opcode == .OpFunctionEnd) break;
             }
         }
@@ -424,18 +417,18 @@ fn load(flush: *Flush, mir: *const Mir, path: ?Path) link.Error!void {
 
         if (imports.get(result_id)) |symbol_index| {
             flush.scratch.reset();
-            try input.copy(flush, &flush.scratch, start, offset, null);
+            try input.copy(flush, &flush.scratch, start, end, null);
             const declaration = try arena.dupe(Word, flush.scratch.instructions.items);
             flush.symbols.values()[symbol_index].declaration = declaration;
             continue;
         }
 
-        switch (header.opcode) {
+        switch (opcode) {
             .OpFunction => if (!has_body) return diags.failParse(path.?, "function declaration without linkage", .{}),
-            .OpVariable => try flush.variables.put(arena, ids[result_id], @fromBackingInt(inst[3])),
+            .OpVariable => try flush.variables.put(arena, ids[result_id], @fromBackingInt(words[3])),
             else => if (!forward_pointers.isSet(result_id)) {
                 flush.scratch.reset();
-                try input.copy(flush, &flush.scratch, start, offset, start + result_index);
+                try input.copy(flush, &flush.scratch, start, end, start + result_index);
                 for (grouped_indices[starts[result_id]..starts[result_id + 1]]) |index| {
                     const annotation = annotations.items[index];
                     if (annotation.class != .annotation) continue;
@@ -466,16 +459,16 @@ fn load(flush: *Flush, mir: *const Mir, path: ?Path) link.Error!void {
             }
         }
 
-        const section = switch (header.opcode) {
+        const section = switch (opcode) {
             .OpFunction => &flush.functions,
             .OpExtInstImport => &flush.extended_instruction_sets,
             .OpString => &flush.debug_strings,
             else => &flush.globals,
         };
-        try input.copy(flush, section, start, offset, null);
-        if (header.opcode == .OpFunction) {
+        try input.copy(flush, section, start, end, null);
+        if (opcode == .OpFunction) {
             const references = try arena.dupe(Id, flush.deps.items);
-            try flush.function_references.put(arena, ids[result_id], references);
+            try flush.fn_refs.put(arena, ids[result_id], references);
         }
     }
 
@@ -532,6 +525,7 @@ fn emitCapabilities(flush: *Flush, out: *Section) link.Error!void {
         if (!target.cpu.has(.spirv, feature)) continue;
         try out.emit(gpa, .OpExtension, .{ .name = name });
     }
+
     if (flush.nonsemantic_info) {
         try out.emit(gpa, .OpExtension, .{ .name = "SPV_KHR_non_semantic_info" });
     }
@@ -594,7 +588,7 @@ fn emitEntryPoints(flush: *Flush, out: *Section) link.Error!void {
                 if (storage_class == .function) continue;
                 if (!v1_4 and storage_class != .input and storage_class != .output) continue;
                 try interface.append(arena, id);
-            } else if (flush.function_references.get(id)) |references| {
+            } else if (flush.fn_refs.get(id)) |references| {
                 try pending.appendSlice(arena, references);
             }
         }

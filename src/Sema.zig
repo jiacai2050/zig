@@ -6977,7 +6977,7 @@ fn analyzeCall(
     const is_inline_call = block.isComptime() or inline_requested;
 
     if (!is_inline_call) {
-        if (func_val == null and !func_is_extern and !block.is_typeof and zcu.getTarget().cpu.arch.isSpirV()) {
+        if (func_val == null and !func_is_extern and !block.is_typeof and zcu.getTarget().cpu.arch.isSpirv()) {
             return sema.fail(block, func_src, "SPIR-V does not support calling function pointers", .{});
         }
         if (sema.func_is_naked) return sema.failWithOwnedErrorMsg(block, msg: {
@@ -15531,7 +15531,7 @@ fn zirAsm(
         }
 
         const constraint = sema.code.nullTerminatedString(input.data.constraint);
-        if (zcu.getTarget().cpu.arch.isSpirV() and std.mem.eql(u8, constraint, "c")) {
+        if (zcu.getTarget().cpu.arch.isSpirv() and std.mem.eql(u8, constraint, "c")) {
             const val = sema.resolveValue(arg.*) orelse {
                 return sema.fail(block, input_src, "assembly input with 'c' constraint must be compile-time known", .{});
             };
@@ -20921,7 +20921,7 @@ fn zirReifySpirvType(
         } },
     };
 
-    if (!target.cpu.arch.isSpirV()) {
+    if (!target.cpu.arch.isSpirv()) {
         return sema.fail(
             block,
             src,
@@ -30286,7 +30286,7 @@ fn checkSpirvSliceAllowed(
     const zcu = sema.pt.zcu;
     const target = zcu.getTarget();
 
-    if (!target.cpu.arch.isSpirV()) return;
+    if (!target.cpu.arch.isSpirv()) return;
     if (block.isComptime()) return;
 
     if (!target_util.addrSpaceIsLogical(target, address_space)) return;
@@ -35069,7 +35069,7 @@ pub fn resolveNavPtrModifiers(
         };
         const addrspace_body = zir_decl.addrspace_body orelse {
             if (zir_decl.linkage == .@"extern" and
-                target.cpu.arch.isSpirV() and
+                target.cpu.arch.isSpirv() and
                 nav_ty.zigTypeTag(zcu) != .@"fn")
             {
                 return sema.fail(
@@ -35090,7 +35090,7 @@ pub fn resolveNavPtrModifiers(
         break :as try sema.analyzeAsAddressSpace(block, addrspace_src, addrspace_ref, addrspace_ctx);
     };
 
-    if (target.cpu.arch.isSpirV()) {
+    if (target.cpu.arch.isSpirv()) {
         if (zir_decl.kind == .@"var" and zir_decl.linkage != .@"extern" and !zir_decl.is_threadlocal) {
             return sema.failWithOwnedErrorMsg(block, msg: {
                 const decl_src = block.nodeOffset(.zero);
