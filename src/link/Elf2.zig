@@ -244,7 +244,7 @@ section_by_name: std.array_hash_map.Auto(String(.shstrtab), void),
 changed_symtab_index: std.array_hash_map.Auto(Symbol.Global.Index, void),
 /// Counts how many relocations are currently in `.rela.dyn` which would require a `DT_TEXTREL`
 /// entry in the `.dynamic` section. This allows adding `DT_TEXTREL` to the output `.dynamic`
-/// section in `flush` only when it is actually necessary. See also `nodeWantsDsoRelocation`.
+/// section in `flush` only when it is actually necessary. See also `nodeAllowsDynamicReloc`.
 textrel_count: u32,
 
 dwarf: Dwarf,
@@ -259,6 +259,8 @@ dwarf_decls: std.array_hash_map.Auto(Dwarf.Decl.Index, dwarf_relocs.Decl),
 
 overflowed_reloc_count: u32,
 misaligned_reloc_count: u32,
+illegal_dynamic_type_reloc_count: u32,
+illegal_dynamic_section_reloc_count: u32,
 
 const_prog_node: std.Progress.Node,
 input_prog_node: std.Progress.Node,
@@ -1409,7 +1411,13 @@ const SymbolReloc = struct {
     /// relocation entry. The entry will be removed if we discover a definition which allows us to
     /// statically resolve the relocation.
     rela_index: Section.RelaIndex.Optional,
-    result: enum(u8) { ok, overflowed, misaligned },
+    result: enum(u8) {
+        ok,
+        overflowed,
+        misaligned,
+        illegal_dynamic_type,
+        illegal_dynamic_section,
+    },
 
     /// Determines the section in which this relocation will be placed if it is outstanding.
     ///
@@ -1961,6 +1969,10 @@ const SymbolReloc = struct {
             .ok => {},
             .overflowed => elf.overflowed_reloc_count -= 1,
             .misaligned => elf.misaligned_reloc_count -= 1,
+            .illegal_dynamic_type, .illegal_dynamic_section => {
+                // This status won't change until a call to `updateDynamicReloc`.
+                return;
+            },
         }
         if (reloc.applyInner(elf)) {
             @branchHint(.likely);
@@ -2071,6 +2083,8 @@ const SymbolReloc = struct {
             .ok => {},
             .overflowed => elf.overflowed_reloc_count -= 1,
             .misaligned => elf.misaligned_reloc_count -= 1,
+            .illegal_dynamic_type => elf.illegal_dynamic_type_reloc_count -= 1,
+            .illegal_dynamic_section => elf.illegal_dynamic_section_reloc_count -= 1,
         }
 
         reloc.* = undefined;
@@ -2084,13 +2098,210 @@ const SymbolReloc = struct {
         reloc.relaSection(elf).relaDeleteOne(elf, rela_index);
         switch (elf.ehdrType()) {
             .REL => {},
-            .EXEC, .DYN => switch (elf.nodeWantsDsoRelocation(reloc.node.unwrap().?)) {
-                .no => unreachable, // there *was* a dynamic relocation!
-                .yes => {},
-                .yes_textrel => elf.textrel_count -= 1,
+            .EXEC, .DYN => switch (elf.nodeAllowsDynamicReloc(reloc.node.unwrap().?)) {
+                .not_alloc => unreachable, // there *was* a dynamic relocation!
+                .ok => {},
+                .ok_textrel => elf.textrel_count -= 1,
             },
         }
         reloc.rela_index = .none;
+    }
+
+    fn updateDynamicReloc(reloc: *SymbolReloc, elf: *Elf) Error!void {
+        assert(elf.ehdrType() != .REL);
+        const reloc_node = reloc.node.unwrap().?; // deleted
+
+        // Delete any current output relocation or error.
+        switch (reloc.result) {
+            .ok, .overflowed, .misaligned => {
+                reloc.deleteOutputRel(elf);
+            },
+            .illegal_dynamic_type => {
+                elf.illegal_dynamic_type_reloc_count -= 1;
+                reloc.result = .ok;
+            },
+            .illegal_dynamic_section => {
+                elf.illegal_dynamic_section_reloc_count -= 1;
+                reloc.result = .ok;
+            },
+        }
+
+        assert(reloc.rela_index == .none);
+
+        const symbol_class = elf.classifySymbolValue(reloc.target);
+
+        switch (reloc.target.unwrap()) {
+            .local => {},
+            .global => |gsi| switch (symbol_class) {
+                .static => gsi.ptr(elf).status.any_static_target_relocs = true,
+                .static_relative => gsi.ptr(elf).status.any_static_relative_target_relocs = true,
+                .dynamic => gsi.ptr(elf).status.any_dynamic_target_relocs = true,
+            },
+        }
+
+        const want_dynamic_reloc: enum {
+            /// `reloc` cannot be statically resolved, but is not an allowed dynamic relocation.
+            illegal,
+            relative,
+            abs_addr,
+            dtp_off,
+            tp_off,
+            size32,
+            size64,
+        } = switch (symbol_class) {
+            .static => return,
+
+            .static_relative => switch (reloc.type.target) {
+                // We need a runtime relocation if the relocation depends on our load address, which
+                // is the case iff the relocation resolves to the absolute value of a symbol. Relocs
+                // which are PC-relative, or which resolve to something other than a symbol address
+                // (e.g. a symbol's size), are fine.
+
+                .pltrel,
+                .rel,
+                .size,
+                .dtpoff,
+                .tpoff,
+                => return,
+
+                .abs, .pltabs => switch (reloc.type.action.simple.dest.isAddr(elf)) {
+                    true => .relative,
+                    false => .illegal,
+                },
+
+                .special => switch (reloc.type.action.special) {
+                    .larch_pcala_hi20,
+                    .larch_pcala64_lo20,
+                    .larch_pcala64_hi12,
+                    .larch_b21,
+                    .larch_b26,
+                    .larch_call36,
+                    .sparc_wdisp10,
+                    .sparc_wdisp16,
+                    .sparc_le_hix22,
+                    => return,
+
+                    .sparc_olo10,
+                    .sparc_hix22,
+                    => .illegal,
+                },
+            },
+
+            .dynamic => switch (reloc.type.target) {
+                // PLT relocations targeting dynamic symbols actually target that symbol's PLT
+                // entry, so we should emit an `R_*_RELATIVE` relocation instead.
+                .pltabs => switch (reloc.type.action.simple.dest.isAddr(elf)) {
+                    true => .relative,
+                    false => .illegal,
+                },
+                // ...although PC-relative PLT relocations don't even need that that!
+                .pltrel => return,
+                // PC-relative relocations are not valid dynamic relocations.
+                .rel => .illegal,
+                // On the few targets supporting size relocations, they are valid at runtime.
+                .size => switch (reloc.type.action.simple.dest) {
+                    .@"32" => .size32,
+                    .@"64" => .size64,
+                    else => .illegal,
+                },
+                // Absolute addresses and TLS offsets can be lowered at runtime provided they
+                // are address-sized.
+                .dtpoff => switch (reloc.type.action.simple.dest.isAddr(elf)) {
+                    true => .dtp_off,
+                    false => .illegal,
+                },
+                .tpoff => switch (reloc.type.action.simple.dest.isAddr(elf)) {
+                    true => .tp_off,
+                    false => .illegal,
+                },
+                .abs => switch (reloc.type.action.simple.dest.isAddr(elf)) {
+                    true => .abs_addr,
+                    false => .illegal,
+                },
+
+                .special => switch (reloc.type.action.special) {
+                    .larch_b21,
+                    .larch_b26,
+                    .larch_call36,
+                    .sparc_wdisp10,
+                    .sparc_wdisp16,
+                    => return,
+
+                    .larch_pcala_hi20,
+                    .larch_pcala64_lo20,
+                    .larch_pcala64_hi12,
+                    .sparc_olo10,
+                    .sparc_hix22,
+                    .sparc_le_hix22,
+                    => .illegal,
+                },
+            },
+        };
+
+        const is_textrel: bool = switch (elf.nodeAllowsDynamicReloc(reloc_node)) {
+            .not_alloc => {
+                // The section containing the relocation is not loaded into memory. These sections
+                // have slightly different rules. In other ELF linkers, they basically just let any
+                // relocation through at any time---they will bind to a local symbol definition if
+                // it exists, or just to 0 otherwise. I think that's a little scary though, so until
+                // I come across a compelling reason for us to mimic that behaviour, let's be more
+                // conservative and only allow what seems necessary:
+                const allow: bool = switch (want_dynamic_reloc) {
+                    // Relocations which target the value/[d]tpoff of a symbol with a local
+                    // definition, and which write their result to a full address-sized word, have
+                    // clear use cases (e.g. DWARF uses these), so let them through.
+                    .relative,
+                    .abs_addr,
+                    .dtp_off,
+                    .tp_off,
+                    => switch (reloc.target.unwrap()) {
+                        .local => true,
+                        .global => |gsi| gsi.resolveAlias(elf).defined(elf),
+                    },
+
+                    // Everything else I'm going to disallow for now. Remember that we're already in
+                    // the dynamic case here, so this isn't disallowing (e.g.) all size relocations
+                    // in these sections, just size relocations *targeting dynamic symbols*!
+                    .size32, .size64, .illegal => false,
+                };
+                if (!allow) {
+                    // ...but in this case we actually do need to trigger an error.
+                    reloc.result = .illegal_dynamic_section;
+                    elf.illegal_dynamic_section_reloc_count += 1;
+                }
+                return;
+            },
+            .ok => false,
+            .ok_textrel => true,
+        };
+
+        const rel_type: MachineRelocType = rel: switch (want_dynamic_reloc) {
+            .illegal => {
+                reloc.result = .illegal_dynamic_type;
+                elf.illegal_dynamic_type_reloc_count += 1;
+                return;
+            },
+            .relative => .relative(elf),
+            .abs_addr => .absAddr(elf),
+            .dtp_off => .dtpOff(elf),
+            .tp_off => .tpOff(elf),
+            .size32 => MachineRelocType.size32(elf) orelse continue :rel .illegal,
+            .size64 => MachineRelocType.size64(elf) orelse continue :rel .illegal,
+        };
+        const target_dynsym: u32 = switch (want_dynamic_reloc) {
+            .illegal => unreachable, // handled above
+            .relative => 0,
+            else => reloc.target.unwrap().global.dynsymIndex(elf).?,
+        };
+
+        try elf.shndx.rela_dyn.relaEnsureAdditionalCapacity(elf, 1);
+        reloc.rela_index = elf.shndx.rela_dyn.relaAddOneAssumeCapacity(elf, .{
+            .type = rel_type,
+            .offset = elf.getNodeVAddr(reloc_node) + reloc.offset,
+            .raw_sym_index = target_dynsym,
+            .addend = reloc.addend.normal,
+        }).toOptional();
+        if (is_textrel) elf.textrel_count += 1;
     }
 };
 
@@ -2909,9 +3120,7 @@ fn addGlobalSymbol(elf: *Elf, opts: Symbol.Global.AddOptions) (error{
             }
         }
 
-        if (elf.mergeGlobalSymbolVisibility(gsi, opts.visibility)) {
-            force_apply_relocs = true;
-        }
+        elf.mergeGlobalSymbolVisibility(gsi, opts.visibility);
 
         // There's already a symbol with this name, we just need to potentially set its value, and
         // to update its bind and visibility.
@@ -3167,14 +3376,23 @@ fn updateGlobalDynamic(elf: *Elf, orig_gsi: Symbol.Global.Index, force_apply_rel
         },
     };
 
-    const omit_dynsym: bool = omit: {
-        if (elf.shndx.dynsym == .UNDEF) break :omit true;
-        break :omit switch (visibility) {
-            .HIDDEN, .INTERNAL => true,
-            .DEFAULT, .PROTECTED => false,
-        };
+    const have_dynsym: bool = switch (elf.shndx.dynsym) {
+        .UNDEF => false,
+        else => switch (visibility) {
+            .HIDDEN, .INTERNAL => false,
+            // An undefined protected dynamic symbol would be pointless, because protected symbols
+            // don't bind to external definitions; so only add to dynsym if we have a definition.
+            .PROTECTED => gsi.defined(elf),
+            // Executables conventionally do not put symbols in their dynamic symbol table unless a
+            // definition is seen, while dynamic libraries just chuck 'em all in.
+            .DEFAULT => switch (elf.base.comp.config.output_mode) {
+                .Exe => gsi.defined(elf) or maybe_dso_global != null,
+                .Lib => true,
+                .Obj => unreachable, // we have a dynamic symbol table
+            },
+        },
     };
-    if (omit_dynsym) {
+    if (!have_dynsym) {
         if (try elf.deleteOwnedDynsym(gsi)) {
             apply_relocs = true;
         }
@@ -3201,9 +3419,14 @@ fn updateGlobalDynamic(elf: *Elf, orig_gsi: Symbol.Global.Index, force_apply_rel
         if (elf.ehdrType() != .REL) {
             assert(elf.classifySymbolValue(.global(gsi)) != .dynamic);
         }
-        gsi.deleteDynamicTargetRelocs(elf);
+
+        if (try gsi.updateDynamicTargetRelocs(elf)) {
+            apply_relocs = true;
+        }
         if (maybe_alias_gsi) |alias_gsi| {
-            alias_gsi.deleteDynamicTargetRelocs(elf);
+            if (try alias_gsi.updateDynamicTargetRelocs(elf)) {
+                apply_relocs = true;
+            }
         }
 
         if (apply_relocs) {
@@ -3462,10 +3685,12 @@ fn updateGlobalDynamic(elf: *Elf, orig_gsi: Symbol.Global.Index, force_apply_rel
         _ = elf.unknown_globals.swapRemove(gsi);
     }
 
-    if (elf.classifySymbolValue(.global(gsi)) != .dynamic) {
-        gsi.deleteDynamicTargetRelocs(elf);
-        if (maybe_alias_gsi) |alias_gsi| {
-            alias_gsi.deleteDynamicTargetRelocs(elf);
+    if (try gsi.updateDynamicTargetRelocs(elf)) {
+        apply_relocs = true;
+    }
+    if (maybe_alias_gsi) |alias_gsi| {
+        if (try alias_gsi.updateDynamicTargetRelocs(elf)) {
+            apply_relocs = true;
         }
     }
 
@@ -3588,15 +3813,12 @@ fn setGlobalSymbolBind(
 /// undefined---their visibility values are combined to determine the resulting visibility.
 ///
 /// Every call to this function *must* be followed by a call to `updateGlobalDynamic` since changes
-/// to symbol visibility can affect the dynamic symbol table entry. If this function returns `true`,
-/// then that `updateGlobalDynamic` call must have the `force_apply_relocs` argument set to `true`,
-/// because this symbol's classification has changed (it is no longer a dynamic symbol) so
-/// relocations targeting the symbol must be re-applied.
+/// to symbol visibility can affect the dynamic symbol table entry.
 fn mergeGlobalSymbolVisibility(
     elf: *Elf,
     gsi: Symbol.Global.Index,
     other_visibility: std.elf.STV,
-) bool {
+) void {
     const old_visibility: std.elf.STV = switch (elf.symPtr(gsi.ptr(elf).symtab_index)) {
         inline else => |sym| elf.targetLoad(&sym.other).visibility,
     };
@@ -3628,13 +3850,13 @@ fn mergeGlobalSymbolVisibility(
         ),
     }
 
-    if (elf.ehdrType() == .REL) {
-        return false;
-    }
+    if (elf.ehdrType() == .REL) return;
 
     // We also need to deal with a concept I call "symbol demotion". If a symbol is `STV_HIDDEN` or
     // `STV_INTERNAL`, and we're emitting an ELF module (executable or shared object, as opposed to
     // a relocatable), then the symbol should be "demoted" to binding `STB_LOCAL` in the output.
+    // TODO: after the latest batch of refactors, I'm unsure if this logic should be here anymore. I
+    // think it should probably live in `updateGlobalDynamic` instead.
     const old_demoted: bool = switch (old_visibility) {
         .INTERNAL, .HIDDEN => true,
         .DEFAULT, .PROTECTED => false,
@@ -3652,16 +3874,6 @@ fn mergeGlobalSymbolVisibility(
         }
         elf.moveDemotedGlobal(gsi);
     }
-
-    const old_protected: bool = switch (old_visibility) {
-        .PROTECTED, .INTERNAL, .HIDDEN => true,
-        .DEFAULT => false,
-    };
-    const new_protected: bool = switch (new_visibility) {
-        .PROTECTED, .INTERNAL, .HIDDEN => true,
-        .DEFAULT => false,
-    };
-    return old_protected != new_protected;
 }
 /// If a symbol which was STB_GLOBAL/STB_WEAK becomes STB_LOCAL (see `mergeGlobalSymbolVisibility`),
 /// the symbol must be moved from the "globals" part of the symtab to the "locals" part, because ELF
@@ -4038,85 +4250,52 @@ const Symbol = struct {
                 return null;
             }
 
-            /// Scans through all relocations targeting `gsi`, deletes their dynamic relocation
-            /// entries, and adds `R_*_RELATIVE` relocation entries as needed.
+            /// Updates the dynamic relocations associated with relocations targeting `gsi`, adding
+            /// or removing them as needed based on the current classification of `gsi`.
             ///
-            /// Asserts we are creating a DSO.
-            fn deleteDynamicTargetRelocs(gsi: Symbol.Global.Index, elf: *Elf) void {
-                if (elf.shndx.dynamic == .UNDEF) return;
+            /// Returns `true` if any relocations were updated, in which case relocations targeting
+            /// `gsi` must be re-applied by the caller.
+            fn updateDynamicTargetRelocs(gsi: Symbol.Global.Index, elf: *Elf) Error!bool {
+                if (elf.shndx.dynamic == .UNDEF) return false;
                 const sym_id: Symbol.Id = .global(gsi);
+
                 switch (elf.classifySymbolValue(sym_id)) {
                     .static => {
                         if (!gsi.ptr(elf).status.any_dynamic_target_relocs and
                             !gsi.ptr(elf).status.any_static_relative_target_relocs)
                         {
-                            return;
+                            return false;
                         }
-                        gsi.ptr(elf).status.any_dynamic_target_relocs = false;
-                        gsi.ptr(elf).status.any_static_relative_target_relocs = false;
-                        gsi.ptr(elf).status.any_static_target_relocs = true;
                     },
                     .static_relative => {
                         if (!gsi.ptr(elf).status.any_dynamic_target_relocs and
                             !gsi.ptr(elf).status.any_static_target_relocs)
                         {
-                            return;
+                            return false;
                         }
-                        gsi.ptr(elf).status.any_dynamic_target_relocs = false;
-                        gsi.ptr(elf).status.any_static_target_relocs = false;
-                        gsi.ptr(elf).status.any_static_relative_target_relocs = true;
                     },
-                    // TODO: this function needs to support a symbol becoming dynamic which wasn't
-                    // previously dynamic (and when it does, the function should be renamed to
-                    // `updateTargetOutputRelocs`). But for now, this isn't supported.
-                    .dynamic => unreachable,
+                    .dynamic => {
+                        if (!gsi.ptr(elf).status.any_static_target_relocs and
+                            !gsi.ptr(elf).status.any_static_relative_target_relocs)
+                        {
+                            return false;
+                        }
+                    },
                 }
+
+                gsi.ptr(elf).status.any_static_target_relocs = false;
+                gsi.ptr(elf).status.any_static_relative_target_relocs = false;
+                gsi.ptr(elf).status.any_dynamic_target_relocs = false;
+
                 var ri = sym_id.index(elf).ptr(elf).first_target_reloc;
                 while (ri != .none) {
                     const reloc = ri.get(elf);
                     assert(reloc.target == sym_id);
-                    reloc.deleteOutputRel(elf);
+                    try reloc.updateDynamicReloc(elf);
                     ri = reloc.next;
                 }
-                switch (elf.classifySymbolValue(sym_id)) {
-                    .static => return,
-                    .static_relative => {},
-                    .dynamic => unreachable,
-                }
-                // We removed the symbol relocations, now add R_*_RELATIVE relocations where needed.
-                ri = sym_id.index(elf).ptr(elf).first_target_reloc;
-                while (ri != .none) {
-                    const reloc = ri.get(elf);
-                    ri = reloc.next;
-                    assert(reloc.target == sym_id);
-                    switch (reloc.type.target) {
-                        // Only relocations which resolve to absolute addresses require runtime
-                        // `R_*_RELATIVE` relocations.
-                        .special,
-                        .pltrel,
-                        .rel,
-                        .dtpoff,
-                        .tpoff,
-                        .size,
-                        => continue,
 
-                        .abs, .pltabs => {},
-                    }
-                    if (!reloc.type.action.simple.dest.isAddr(elf)) continue;
-                    const node = reloc.node.unwrap().?;
-                    switch (elf.nodeWantsDsoRelocation(node)) {
-                        .no => continue,
-                        .yes_textrel => elf.textrel_count += 1,
-                        .yes => {},
-                    }
-                    // There is capacity for a relocation because we just deleted one earlier.
-                    reloc.rela_index = elf.shndx.rela_dyn.relaAddOneAssumeCapacity(elf, .{
-                        .type = .relative(elf),
-                        .offset = elf.getNodeVAddr(node) + reloc.offset,
-                        .raw_sym_index = 0,
-                        .addend = 0,
-                    }).toOptional();
-                }
+                return true;
             }
 
             const Optional = enum(u32) {
@@ -4370,61 +4549,53 @@ fn classifySymbolValue(elf: *Elf, sym: Symbol.Id) enum {
         .EXEC => false,
     };
 
-    if (elf.shndx.dynamic == .UNDEF) {
-        // This is a static non-PIE executable---every symbol has a statically known value.
-        return .static;
-    }
-
     const resolved_sym = sym.resolveAlias(elf);
 
-    const shndx: Section.Index, const visibility: std.elf.STV = switch (elf.symPtr(resolved_sym.index(elf))) {
+    const symtab_shndx: Section.Index, const visibility: std.elf.STV = switch (elf.symPtr(resolved_sym.index(elf))) {
         inline else => |sym_ptr| .{
             .fromSection(elf.targetLoad(&sym_ptr.shndx)),
             elf.targetLoad(&sym_ptr.other).visibility,
         },
     };
 
-    switch (resolved_sym.unwrap()) {
-        .local => {
-            assert(shndx != .UNDEF);
+    const shndx: Section.Index = switch (resolved_sym.unwrap()) {
+        .local => shndx: {
+            assert(symtab_shndx != .UNDEF);
             assert(visibility == .DEFAULT);
+            break :shndx symtab_shndx;
         },
-        .global => |gsi| if (visibility == .DEFAULT and comp.config.output_mode != .Exe) {
-            // An unprotected symbol in a DSO which is not an executable is subject to runtime
-            // preemption, so a dynamic relocation is required for it even if we have a definition.
-            return .dynamic;
-        } else if (elf.copied_globals.contains(gsi)) {
-            // This becomes a locally-defined symbol in `.data`.
-            return if (runtime_load_addr) .static_relative else .static;
-        },
-    }
+        .global => |gsi| shndx: {
+            const shndx: Section.Index = switch (symtab_shndx) {
+                .UNDEF => if (elf.copied_globals.contains(gsi)) .data else .UNDEF,
+                else => |shndx| shndx,
+            };
 
-    return switch (shndx) {
-        .UNDEF => switch (visibility) {
-            .DEFAULT => if (comp.config.link_mode == .static and comp.config.output_mode == .Exe) {
-                assert(comp.config.pie); // non-PIE static exe should not have a `.dynamic` section
-                // This is a static PIE---we'll see a definition at some point, so there'd be no
-                // point in adding an invalid dynamic relocation (the only valid dynamic relation
-                // type in a static PIE is `R_*_RELATIVE`).
-                return .static;
-            } else .dynamic, // external symbol
+            // Check for dynamic symbols before falling into the static path.
+            if (gsi.dynsymIndex(elf) != null and visibility == .DEFAULT) {
+                if (shndx == .UNDEF) {
+                    // There is no local definition of this symbol.
+                    return .dynamic;
+                } else if (comp.config.output_mode != .Exe) {
+                    // There is a local definition, but it is preemptible at runtime.
+                    return .dynamic;
+                }
+            }
 
-            // If the symbol *cannot* be external, then there's no point making a dynamic relocation
-            // now---if linking succeeds we won't need anything more than perhaps an `R_*_RELATIVE`.
-            .INTERNAL, .HIDDEN, .PROTECTED => .static,
-        },
-
-        .ABS => .static,
-
-        else => if (runtime_load_addr and
-            shndx.flags(elf).ALLOC and
-            !shndx.flags(elf).TLS)
-        {
-            return .static_relative;
-        } else {
-            return .static;
+            break :shndx shndx;
         },
     };
+
+    if (runtime_load_addr and
+        shndx != .UNDEF and
+        shndx != .ABS and
+        shndx.flags(elf).ALLOC and
+        !shndx.flags(elf).TLS)
+    {
+        // This symbol's value is a virtual address relative to a runtime-known load address.
+        return .static_relative;
+    }
+
+    return .static;
 }
 
 pub fn symbolForAtom(elf: *Elf, atom: link.File.AtomId) link.File.SymbolId {
@@ -4994,6 +5165,8 @@ fn create(
 
         .overflowed_reloc_count = 0,
         .misaligned_reloc_count = 0,
+        .illegal_dynamic_type_reloc_count = 0,
+        .illegal_dynamic_section_reloc_count = 0,
 
         .const_prog_node = .none,
         .input_prog_node = .none,
@@ -9701,18 +9874,21 @@ fn addSymbolRelocAssumeCapacityInner(
 ) Error!void {
     assert(elf.ehdrType() != .REL);
 
-    const rela_index: Section.RelaIndex.Optional = r: {
-        if (elf.shndx.dynamic == .UNDEF) break :r .none;
-
-        // If we emit a runtime relocation entry, its `offset` is a virtual address, so we need to
-        // determine the vaddr of `node`.
-        const node_vaddr = elf.getNodeVAddr(node);
-
-        // If this is `true`, we will try to create a copy relocation for the target symbol if it is
-        // not locally defined. If the relocation value is always computed from the target symbol's
-        // value (even for an external target symbol), and if the target symbol might be of type
-        // STT_OBJECT, this should probably be `true`.
-        const try_copy_reloc: bool = switch (@"type".target) {
+    request_static_target: {
+        if (elf.shndx.dynamic == .UNDEF) break :request_static_target;
+        const gsi: Symbol.Global.Index = switch (target.unwrap()) {
+            .local => break :request_static_target,
+            .global => |gsi| gsi,
+        };
+        // The target symbol may be dynamic, in which case its value cannot be resolved statically.
+        // However, there are strategies (such as copy relocations) the linker can employ which can
+        // effectively convert dynamic symbols into static symbols. If statically resolving this
+        // relocation would require knowing the symbol value, we can set a flag so that those
+        // strategies are used when possible to make this relocation statically resolvable.
+        //
+        // (This `switch` should return `false` for TLS relocations, because we can't do anything
+        // about TLS symbols being dynamic.)
+        const want_static_value: bool = switch (@"type".target) {
             .rel, .abs => true,
 
             .pltrel,
@@ -9741,92 +9917,13 @@ fn addSymbolRelocAssumeCapacityInner(
                 => false,
             },
         };
-        if (try_copy_reloc) switch (target.unwrap()) {
-            .local => {},
-            .global => |gsi| if (!gsi.ptr(elf).status.want_static_value) {
-                gsi.ptr(elf).status.want_static_value = true;
-                try elf.updateGlobalDynamic(gsi, false);
-            },
-        };
+        if (!want_static_value) break :request_static_target;
 
-        classify: switch (elf.classifySymbolValue(target)) {
-            .static => {
-                switch (target.unwrap()) {
-                    .local => {},
-                    .global => |gsi| gsi.ptr(elf).status.any_static_target_relocs = true,
-                }
-                break :r .none;
-            },
-            .static_relative => {
-                switch (target.unwrap()) {
-                    .local => {},
-                    .global => |gsi| gsi.ptr(elf).status.any_static_relative_target_relocs = true,
-                }
-                switch (@"type".target) {
-                    // Only relocations which resolve to absolute addresses require runtime
-                    // `R_*_RELATIVE` relocations.
-                    .special,
-                    .pltrel,
-                    .rel,
-                    .dtpoff,
-                    .tpoff,
-                    .size,
-                    => break :r .none,
-
-                    .abs, .pltabs => {},
-                }
-                if (!@"type".action.simple.dest.isAddr(elf)) break :r .none;
-                switch (elf.nodeWantsDsoRelocation(node)) {
-                    .no => break :r .none,
-                    .yes => {},
-                    .yes_textrel => elf.textrel_count += 1,
-                }
-                break :r elf.shndx.rela_dyn.relaAddOneAssumeCapacity(elf, .{
-                    .type = .relative(elf),
-                    .offset = node_vaddr + offset,
-                    .raw_sym_index = 0,
-                    .addend = 0,
-                }).toOptional();
-            },
-            .dynamic => {
-                target.unwrap().global.ptr(elf).status.any_dynamic_target_relocs = true;
-                const dynamic_reloc_type: MachineRelocType = switch (@"type".target) {
-                    // PLT relocations targeting dynamic symbols actually target that symbol's PLT
-                    // entry, so we should emit an `R_*_RELATIVE` relocation instead.
-                    .pltabs => continue :classify .static_relative,
-                    // ...although PC-relative PLT relocations don't even need that!
-                    .pltrel => break :r .none,
-                    // Weird sizes or computations are not supported as runtime relocations.
-                    .special => break :r .none,
-                    // Relative addresses are not supported as runtime relocations.
-                    .rel => break :r .none,
-
-                    // On the few targets supporting size relocations, they are valid at runtime.
-                    .size => switch (@"type".action.simple.dest) {
-                        .@"32" => MachineRelocType.size32(elf) orelse break :r .none,
-                        .@"64" => MachineRelocType.size64(elf) orelse break :r .none,
-                        else => break :r .none,
-                    },
-                    // Absolute addresses and TLS offsets can be lowered at runtime provided they
-                    // are address-sized.
-                    .dtpoff => if (@"type".action.simple.dest.isAddr(elf)) .dtpOff(elf) else break :r .none,
-                    .tpoff => if (@"type".action.simple.dest.isAddr(elf)) .tpOff(elf) else break :r .none,
-                    .abs => if (@"type".action.simple.dest.isAddr(elf)) .absAddr(elf) else break :r .none,
-                };
-                switch (elf.nodeWantsDsoRelocation(node)) {
-                    .no => break :r .none,
-                    .yes => {},
-                    .yes_textrel => elf.textrel_count += 1,
-                }
-                break :r elf.shndx.rela_dyn.relaAddOneAssumeCapacity(elf, .{
-                    .type = dynamic_reloc_type,
-                    .offset = node_vaddr + offset,
-                    .raw_sym_index = target.unwrap().global.dynsymIndex(elf).?,
-                    .addend = addend.normal,
-                }).toOptional();
-            },
+        if (!gsi.ptr(elf).status.want_static_value) {
+            gsi.ptr(elf).status.want_static_value = true;
+            try elf.updateGlobalDynamic(gsi, false);
         }
-    };
+    }
 
     const ri: SymbolReloc.Index = @fromBackingInt(@intCast(elf.symbol_relocs.items.len));
     const first_target_reloc = &target.index(elf).ptr(elf).first_target_reloc;
@@ -9841,12 +9938,13 @@ fn addSymbolRelocAssumeCapacityInner(
         .type = @"type",
         .next = next,
         .prev = .none,
-        .rela_index = rela_index,
+        .rela_index = .none,
         .result = .ok,
     });
     if (@"type".dependsOnTlsSize(elf)) {
         elf.tls_size_symbol_relocs.putAssumeCapacityNoClobber(ri, {});
     }
+    try ri.get(elf).updateDynamicReloc(elf);
 
     // Actually apply the new relocation!
     ri.get(elf).apply(elf);
@@ -10177,18 +10275,19 @@ fn updateGotEntry(elf: *Elf, got_index: usize) void {
     };
 }
 
-/// If `node` cannot contain runtime relocations, returns `.no`.
+/// If `node` cannot contain dynamic relocations because it is not loaded into memory at runtime,
+/// returns `.not_alloc`.
 ///
-/// If `node` can contain runtime relocations, returns `.yes_textrel` if such a relocation requires
-/// the presence of a `DT_TEXTREL` dynamic entry, or `.yes` otherwise.
-fn nodeWantsDsoRelocation(elf: *Elf, node: MappedFile.Node.Index) enum { yes, yes_textrel, no } {
+/// Otherwise, returns `.ok_textrel` if placing a dynamic relocation in this node requires the
+/// presence of a `DT_TEXTREL` dynamic entry, or `.ok` otherwise.
+fn nodeAllowsDynamicReloc(elf: *Elf, node: MappedFile.Node.Index) enum { ok, ok_textrel, not_alloc } {
     const shndx = elf.getNodeShndx(node);
     const shf: std.elf.SHF = switch (elf.shdrPtr(shndx)) {
         inline else => |shdr| elf.targetLoad(&shdr.flags).shf,
     };
-    if (!shf.ALLOC) return .no;
-    if (!shf.WRITE) return .yes_textrel;
-    return .yes;
+    if (!shf.ALLOC) return .not_alloc;
+    if (!shf.WRITE) return .ok_textrel;
+    return .ok;
 }
 
 pub fn updateNav(elf: *Elf, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index) link.Error!void {
@@ -10209,15 +10308,8 @@ fn updateNavInner(elf: *Elf, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index)
     const nav = ip.getNav(nav_index);
     const mod = zcu.fileByIndex(nav.srcInst(ip).resolveFile(ip)).mod.?;
     switch (ip.indexToKey(nav.resolved.?.value)) {
-        .@"extern" => |@"extern"| {
+        .@"extern" => {
             if (mod.strip or elf.ehdrMachine() != .X86_64) return;
-            const si = try elf.externSymbol(.{
-                .name = @"extern".name.toSlice(ip),
-                .lib_name = @"extern".lib_name.toSlice(ip),
-                .type = elf.navType(nav.resolved.?),
-                .linkage = @"extern".linkage,
-                .visibility = @"extern".visibility,
-            });
             const dwarf_gi = try elf.dwarf.getGlobal(nav_index);
             const dwarf_global = dwarf_gi.get(&elf.dwarf);
             const debug_info_ni = dwarf_global.debug_info_ni.unwrap().?;
@@ -10226,10 +10318,7 @@ fn updateNavInner(elf: *Elf, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index)
             debug_info_ni.writer(gpa, &elf.mf, &di_nw);
             defer di_nw.deinit();
             elf.resetNodeRelocs(debug_info_ni);
-            try elf.dwarf.updateExtern(pt, &di_nw, switch (elf.ehdrMachine()) {
-                else => unreachable,
-                .X86_64 => .x86_64,
-            }, si, nav_index);
+            try elf.dwarf.updateExtern(pt, &di_nw, nav_index);
         },
         else => if (Type.fromInterned(nav.resolved.?.type).hasRuntimeBits(zcu)) {
             const nmi = try elf.navMapIndex(zcu, nav_index);
@@ -10757,10 +10846,28 @@ fn flushInner(
     defer elf.mf.nodes_lock.unlock();
 
     if (elf.overflowed_reloc_count > 0) {
-        diags.addError("failed to apply {d} relocations: overflow", .{elf.overflowed_reloc_count});
+        diags.addError(
+            "failed to apply {d} relocations: overflow",
+            .{elf.overflowed_reloc_count},
+        );
     }
     if (elf.misaligned_reloc_count > 0) {
-        diags.addError("failed to apply {d} relocations: misaligned value", .{elf.misaligned_reloc_count});
+        diags.addError(
+            "failed to apply {d} relocations: misaligned value",
+            .{elf.misaligned_reloc_count},
+        );
+    }
+    if (elf.illegal_dynamic_type_reloc_count > 0) {
+        diags.addError(
+            "refusing to emit {d} dynamic relocations with illegal types",
+            .{elf.illegal_dynamic_type_reloc_count},
+        );
+    }
+    if (elf.illegal_dynamic_section_reloc_count > 0) {
+        diags.addError(
+            "refusing to emit {d} dynamic relocations in non-allocated sections",
+            .{elf.illegal_dynamic_section_reloc_count},
+        );
     }
 
     if (elf.archive) |*archive| {
