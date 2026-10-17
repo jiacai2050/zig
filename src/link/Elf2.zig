@@ -10857,7 +10857,7 @@ pub fn idle(elf: *Elf) link.Error!bool {
             break :task;
         }
         while (elf.mf.updates.pop()) |ni| : (elf.mf.update_prog_node.completeOne()) {
-            if (ni.pendingDelete(&elf.mf)) continue;
+            ni.cleanUpdated(&elf.mf);
             const clean_moved = ni.cleanMoved(&elf.mf);
             const clean_resized = ni.cleanResized(&elf.mf);
             const clean_next_moved = ni.cleanNextMoved(&elf.mf);
