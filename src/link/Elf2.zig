@@ -461,6 +461,135 @@ const Node = union(enum) {
     fn fromAtom(atom: link.File.AtomId) MappedFile.Node.Index {
         return @fromBackingInt(@backingInt(atom));
     }
+
+    fn fmtDebug(ni: MappedFile.Node.Index, elf: *Elf) FormatDebug {
+        return .{ .ni = ni, .elf = elf };
+    }
+    const FormatDebug = struct {
+        ni: MappedFile.Node.Index,
+        elf: *Elf,
+        pub fn format(ctx: FormatDebug, w: *Io.Writer) Io.Writer.Error!void {
+            const elf = ctx.elf;
+            const node = elf.getNode(ctx.ni);
+            try w.writeAll(@tagName(node));
+            switch (node) {
+                // nodes with no payload
+                .deleted,
+                .archive,
+                .archive_header,
+                .elf,
+                .ehdr,
+                .shdr,
+                .debug_addr,
+                .eh_frame_footer,
+                .debug_str_offsets,
+                .unit_padding,
+                .archive_elf_member_header,
+                => |tag| comptime assert(@TypeOf(tag) == void),
+
+                .archive_input_member => |ii| try w.print("({f}{f})", .{
+                    ii.path(elf).fmtEscapeString(),
+                    fmtMemberString(ii.member(elf)),
+                }),
+                .segment => |phndx| switch (elf.phdrSlice()) {
+                    inline else => |phdr| {
+                        const ph = &phdr[phndx];
+                        try w.writeByte('(');
+                        const pt = elf.targetLoad(&ph.type);
+                        if (std.enums.tagName(std.elf.PT, pt)) |pt_name|
+                            try w.writeAll(pt_name)
+                        else inline for (@typeInfo(std.elf.PT).@"enum".decl_names) |decl_name| {
+                            const decl_val = @field(std.elf.PT, decl_name);
+                            if (@TypeOf(decl_val) != std.elf.PT) continue;
+                            if (pt == @field(std.elf.PT, decl_name)) break try w.writeAll(decl_name);
+                        } else try w.print("0x{x}", .{pt});
+                        try w.writeAll(", ");
+                        const pf = elf.targetLoad(&ph.flags);
+                        if (pf.R) try w.writeByte('R');
+                        if (pf.W) try w.writeByte('W');
+                        if (pf.X) try w.writeByte('X');
+                        try w.writeByte(')');
+                    },
+                },
+                .section, .section_manual_size => |shndx| try w.print("({q})", .{
+                    shndx.name(elf).slice(elf),
+                }),
+                .input_section => |isi| {
+                    const ii = isi.input(elf);
+                    try w.print("({f}{f}, {q})", .{
+                        ii.path(elf).fmtEscapeString(),
+                        fmtMemberString(ii.member(elf)),
+                        elf.getNodeShndx(isi.node(elf)).name(elf).slice(elf),
+                    });
+                },
+                .copied_global => |gsi| try w.print("({q})", .{
+                    gsi.rawName(elf).slice(elf),
+                }),
+                .nav => |nmi| {
+                    const ip = &elf.base.comp.zcu.?.intern_pool;
+                    try w.print("({qf})", .{
+                        ip.getNav(nmi.nav(elf)).fqn.fmt(ip),
+                    });
+                },
+                .uav => |umi| {
+                    const zcu = elf.base.comp.zcu.?;
+                    const val: Value = .fromInterned(umi.uavValue(elf));
+                    try w.print("({f}, {f})", .{
+                        val.typeOf(zcu).fmt(zcu),
+                        val.fmtValue(zcu),
+                    });
+                },
+                inline .lazy_code, .lazy_const_data => |lmi| try w.print("({f})", .{
+                    Type.fromInterned(lmi.lazySymbol(elf).ty).fmt(elf.base.comp.zcu.?),
+                }),
+
+                .debug_shared => |ss| try w.print("({t})", .{ss}),
+
+                .unit_frame,
+                .unit_frame_cie,
+                .unit_debug_info,
+                .unit_debug_info_header,
+                .unit_debug_info_footer,
+                .unit_debug_line,
+                .unit_debug_line_header,
+                .unit_debug_rnglists,
+                => |ui| try w.print("({q})", .{
+                    ui.mod(&elf.dwarf).fully_qualified_name,
+                }),
+
+                .const_debug_info => |cpi| switch (cpi.val(&elf.dwarf.const_pool)) {
+                    .generic_poison_type => try w.writeAll("(anytype)"),
+                    else => |val| try w.print("({f})", .{
+                        Value.fromInterned(val).fmtValue(elf.base.comp.zcu.?),
+                    }),
+                },
+                .global_debug_info => |gi| {
+                    const ip = &elf.base.comp.zcu.?.intern_pool;
+                    try w.print("({qf})", .{
+                        ip.getNav(gi.nav(&elf.dwarf)).fqn.fmt(ip),
+                    });
+                },
+                .func_frame_fde, .func_debug_info, .func_debug_line => |fi| {
+                    const ip = &elf.base.comp.zcu.?.intern_pool;
+                    try w.print("({qf})", .{
+                        ip.getNav(fi.nav(&elf.dwarf)).fqn.fmt(ip),
+                    });
+                },
+                .decl_debug_info => |di| {
+                    const comp = elf.base.comp;
+                    const zcu = comp.zcu.?;
+                    const ip = &zcu.intern_pool;
+                    const src_inst = di.srcInst(&elf.dwarf);
+                    const path = zcu.fileByIndex(src_inst.resolveFile(ip)).path;
+                    if (src_inst.resolve(ip)) |inst| {
+                        try w.print("({f}, %{d})", .{ path.fmt(comp), inst });
+                    } else {
+                        try w.print("({f}, lost)", .{path.fmt(comp)});
+                    }
+                },
+            }
+        }
+    };
 };
 
 const InputSection = struct {
@@ -2985,9 +3114,14 @@ fn addGlobalSymbol(elf: *Elf, opts: Symbol.Global.AddOptions) (error{
 /// some operation which requires relocations to be re-applied, it can pass `force_apply_relocs` as
 /// `true` to guarantee this function to do so.
 fn updateGlobalDynamic(elf: *Elf, orig_gsi: Symbol.Global.Index, force_apply_relocs: bool) Error!void {
+    const trace = tracy.trace(@src());
+    defer trace.end();
+
     const gpa = elf.base.comp.gpa;
 
     const gsi = orig_gsi.resolveAlias(elf);
+
+    trace.addText(gsi.rawName(elf).slice(elf));
 
     const maybe_alias_gsi = gsi.findAliaser(elf);
 
@@ -4132,7 +4266,20 @@ const Symbol = struct {
         }
 
         fn flushMoved(sym_id: Symbol.Id, elf: *Elf, new_value: u64) void {
+            const trace = tracy.trace(@src());
+            defer trace.end();
+
             const sym_index = sym_id.index(elf);
+
+            trace.addText(name: {
+                // There isn't a general `name` method on `Symbol.Id` because it would be incorrect
+                // to ever actually care about the name of a local symbol.
+                const name: String(.strtab) = switch (elf.symPtr(sym_index)) {
+                    inline else => |sym| @fromBackingInt(elf.targetLoad(&sym.name)),
+                };
+                break :name name.slice(elf);
+            });
+
             switch (elf.symPtr(sym_index)) {
                 inline else => |sym| elf.targetStore(&sym.value, @intCast(new_value)),
             }
@@ -10717,6 +10864,9 @@ pub fn idle(elf: *Elf) link.Error!bool {
     elf.mf.nodes_lock.lock();
     defer elf.mf.nodes_lock.unlock();
 
+    const trace = tracy.trace(@src());
+    defer trace.end();
+
     const comp = elf.base.comp;
     const diags = &comp.link_diags;
 
@@ -11285,6 +11435,7 @@ fn flushElfOffset(elf: *Elf, ni: MappedFile.Node.Index) void {
 fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void {
     const trace = tracy.trace(@src());
     defer trace.end();
+    trace.addTextFmt("{f}", .{Node.fmtDebug(ni, elf)});
 
     switch (elf.getNode(ni)) {
         .deleted => unreachable,
@@ -11904,6 +12055,7 @@ fn allocateSegmentLoadAddress(elf: *Elf, orig_phndx: u32) std.mem.Allocator.Erro
 fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void {
     const trace = tracy.trace(@src());
     defer trace.end();
+    trace.addTextFmt("{f}", .{Node.fmtDebug(ni, elf)});
 
     _, const size = ni.location(&elf.mf).resolve(&elf.mf);
     switch (elf.getNode(ni)) {
@@ -12039,6 +12191,7 @@ fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
 fn flushPadding(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void {
     const trace = tracy.trace(@src());
     defer trace.end();
+    trace.addTextFmt("{f}", .{Node.fmtDebug(ni, elf)});
 
     const node = elf.getNode(ni);
     switch (node) {
@@ -12798,111 +12951,8 @@ pub fn printNode(
     ni: MappedFile.Node.Index,
     indent: usize,
 ) Io.Writer.Error!void {
-    const node = elf.getNode(ni);
     try w.splatByteAll(' ', indent);
-    try w.writeAll(@tagName(node));
-    switch (node) {
-        else => {},
-        .segment => |phndx| switch (elf.phdrSlice()) {
-            inline else => |phdr| {
-                const ph = &phdr[phndx];
-                try w.writeByte('(');
-                const pt = elf.targetLoad(&ph.type);
-                if (std.enums.tagName(std.elf.PT, pt)) |pt_name|
-                    try w.writeAll(pt_name)
-                else inline for (@typeInfo(std.elf.PT).@"enum".decl_names) |decl_name| {
-                    const decl_val = @field(std.elf.PT, decl_name);
-                    if (@TypeOf(decl_val) != std.elf.PT) continue;
-                    if (pt == @field(std.elf.PT, decl_name)) break try w.writeAll(decl_name);
-                } else try w.print("0x{x}", .{pt});
-                try w.writeAll(", ");
-                const pf = elf.targetLoad(&ph.flags);
-                if (pf.R) try w.writeByte('R');
-                if (pf.W) try w.writeByte('W');
-                if (pf.X) try w.writeByte('X');
-                try w.writeByte(')');
-            },
-        },
-        .section, .section_manual_size => |shndx| try w.print("({s})", .{shndx.name(elf).slice(elf)}),
-        .input_section => |isi| {
-            const ii = isi.input(elf);
-            try w.print("({f}{f}, {s})", .{
-                ii.path(elf).fmtEscapeString(),
-                fmtMemberString(ii.member(elf)),
-                elf.getNodeShndx(isi.node(elf)).name(elf).slice(elf),
-            });
-        },
-        .copied_global => |gsi| try w.print("(copy:{s})", .{gsi.rawName(elf).slice(elf)}),
-        .nav => |nmi| {
-            const zcu = elf.base.comp.zcu.?;
-            const ip = &zcu.intern_pool;
-            const nav = ip.getNav(nmi.nav(elf));
-            try w.print("({f}, {f})", .{
-                Type.fromInterned(nav.resolved.?.type).fmt(zcu),
-                nav.fqn.fmt(ip),
-            });
-        },
-        .uav => |umi| {
-            const zcu = elf.base.comp.zcu.?;
-            const val: Value = .fromInterned(umi.uavValue(elf));
-            try w.print("({f}, {f})", .{
-                val.typeOf(zcu).fmt(zcu),
-                val.fmtValue(zcu),
-            });
-        },
-        inline .lazy_code, .lazy_const_data => |lmi| try w.print("({f})", .{
-            Type.fromInterned(lmi.lazySymbol(elf).ty).fmt(elf.base.comp.zcu.?),
-        }),
-        .debug_shared => |ss| try w.print("({})", .{ss}),
-        .unit_frame,
-        .unit_frame_cie,
-        .unit_debug_info,
-        .unit_debug_info_header,
-        .unit_debug_info_footer,
-        .unit_debug_line,
-        .unit_debug_line_header,
-        .unit_debug_rnglists,
-        => |ui| try w.print("({s})", .{ui.mod(&elf.dwarf).fully_qualified_name}),
-        .const_debug_info => |cpi| switch (cpi.val(&elf.dwarf.const_pool)) {
-            .generic_poison_type => try w.writeAll("(anytype)"),
-            else => |val| try w.print("({f})", .{
-                Value.fromInterned(val).fmtValue(elf.base.comp.zcu.?),
-            }),
-        },
-        .global_debug_info => |gi| {
-            const zcu = elf.base.comp.zcu.?;
-            const ip = &zcu.intern_pool;
-            const nav = ip.getNav(gi.nav(&elf.dwarf));
-            try w.writeByte('(');
-            if (nav.resolved) |resolved| try w.print("{f}, ", .{
-                Type.fromInterned(resolved.type).fmt(zcu),
-            });
-            try w.print("{f}", .{nav.fqn.fmt(ip)});
-            if (nav.resolved) |resolved| try w.print(", {f}", .{
-                Value.fromInterned(resolved.value).fmtValue(zcu),
-            });
-            try w.writeByte(')');
-        },
-        .func_frame_fde, .func_debug_info, .func_debug_line => |fi| {
-            const zcu = elf.base.comp.zcu.?;
-            const ip = &zcu.intern_pool;
-            const nav = ip.getNav(fi.nav(&elf.dwarf));
-            try w.writeByte('(');
-            if (nav.resolved) |resolved| try w.print("{f}, ", .{
-                Type.fromInterned(resolved.type).fmt(zcu),
-            });
-            try w.print("{f})", .{nav.fqn.fmt(ip)});
-        },
-        .decl_debug_info => |di| {
-            const comp = elf.base.comp;
-            const zcu = comp.zcu.?;
-            const ip = &zcu.intern_pool;
-            const src_inst = di.srcInst(&elf.dwarf);
-            try w.print("({f}, ", .{zcu.fileByIndex(src_inst.resolveFile(ip)).path.fmt(comp)});
-            if (src_inst.resolve(ip)) |inst| try w.print("%{d}", .{inst}) else try w.writeAll("lost");
-            try w.writeByte(')');
-        },
-    }
+    try w.print("{f}", .{Node.fmtDebug(ni, elf)});
     {
         const mf_node = &elf.mf.nodes.items[@backingInt(ni)];
         const off, const size = mf_node.location().resolve(&elf.mf);
