@@ -246,6 +246,7 @@ changed_symtab_index: std.array_hash_map.Auto(Symbol.Global.Index, void),
 /// entry in the `.dynamic` section. This allows adding `DT_TEXTREL` to the output `.dynamic`
 /// section in `flush` only when it is actually necessary. See also `nodeAllowsDynamicReloc`.
 textrel_count: u32,
+entry_gsi: Symbol.Global.Index.Optional,
 
 dwarf: Dwarf,
 dwarf_shared: std.enums.EnumArray(Dwarf.SharedSection, dwarf_relocs.Shared),
@@ -3073,6 +3074,8 @@ fn addGlobalSymbol(elf: *Elf, opts: Symbol.Global.AddOptions) (error{
 } || Error)!Symbol.Global.Index {
     _ = opts.lib_name; // TODO
 
+    log.debug("addGlobalSymbol({q})", .{opts.name});
+
     const gpa = elf.base.comp.gpa;
 
     try elf.symtab.ensureUnusedCapacity(gpa, 1);
@@ -5138,6 +5141,7 @@ fn create(
         .section_by_name = .empty,
         .changed_symtab_index = .empty,
         .textrel_count = 0,
+        .entry_gsi = undefined,
 
         .dwarf = .init(&elf.base, switch (comp.config.debug_format) {
             .strip => .@"32", // for .eh_frame
@@ -6560,6 +6564,31 @@ fn initHeaders(
         },
         .code_view => unreachable,
     }
+
+    // If we have an entry point symbol, create the undefined reference now.
+    elf.entry_gsi = entry: switch (elf.options.entry) {
+        .default => switch (comp.config.output_mode) {
+            .Exe => continue :entry .enabled,
+            .Lib, .Obj => continue :entry .disabled,
+        },
+        .enabled => continue :entry .{ .named = "_start" },
+        .disabled => .none,
+        .named => |sym_name| .wrap(elf.addGlobalSymbol(.{
+            .node = .none,
+            .name = sym_name,
+            .value = 0,
+            .size = 0,
+            .type = .NOTYPE,
+            .bind = .strong,
+            .visibility = .DEFAULT,
+            .shndx = .UNDEF,
+        }) catch |err| switch (err) {
+            error.MultipleDefinitions => unreachable, // shndx is undef
+            error.MultipleDefaultVersions => unreachable, // not a versioned symbol
+            error.UndefinedDefaultVersion => unreachable, // not a versioned symbol
+            else => |e| return e,
+        }),
+    };
 
     assert(elf.nodes.len == expected_nodes_len);
     assert(elf.shdrs.items.len == shnum - 1); // -1 to exclude SHN_UNDEF
@@ -10884,20 +10913,22 @@ fn flushInner(
     elf.flushDynamic();
 
     const entry_addr: u64 = entry: {
-        const sym_name: []const u8 = name: switch (elf.options.entry) {
-            .default => switch (comp.config.output_mode) {
-                .Exe => continue :name .enabled,
-                .Lib, .Obj => continue :name .disabled,
-            },
-            .disabled => break :entry 0,
-            .enabled => "_start",
-            .named => |named| named,
-        };
-        const gsi = elf.globalByName(.{
-            .name = sym_name,
-            .version = null,
-        }) orelse break :entry 0;
-        break :entry Symbol.Id.global(gsi).value(elf);
+        const entry_gsi = elf.entry_gsi.unwrap() orelse break :entry 0;
+
+        // Even though we already reported undefined globals earlier, we also need to check here
+        // whether the entry point is defined. There are two reasons for this:
+        //
+        // * If we are emitting something other than an executable, we skipped the undefined globals
+        //   check, but there could still be an entry point (e.g. due to `-fentry=foo` on the CLI).
+        //
+        // * The entry point might be defined in an input DSO, which would satisfy the undefined
+        //   symbol reference but is insufficient here: the entry point needs a local definition.
+
+        if (!entry_gsi.resolveAlias(elf).defined(elf)) {
+            return diags.fail("undefined entry point symbol '{s}'", .{entry_gsi.name(elf)});
+        }
+
+        break :entry Symbol.Id.global(entry_gsi).value(elf);
     };
     switch (elf.ehdrPtr()) {
         inline else => |ehdr| elf.targetStore(&ehdr.entry, @intCast(entry_addr)),
