@@ -5376,9 +5376,10 @@ fn initHeaders(
                     defer phnum += 1;
                     break :phndx phnum;
                 } else undefined,
-                // `data` must be assigned after all other loadable segments so that it has the greatest
-                // phndx of any loadable segment. This is so that `targetSegmentLoadAddressRestrictions`
-                // can be obeyed (specifically, the `.data_last` restriction, needed on SPARC).
+                // `data` must be assigned after all other loadable segments so that it has the last
+                // phndx of the loadable segments. This causes `updateSegmentLoadAddresses` to put
+                // that segment's virtual address after the others, which is a de-facto requirement
+                // on SPARC. More details are in a comment in `updateSegmentLoadAddresses`.
                 .data = phndx: {
                     defer phnum += 1;
                     break :phndx phnum;
@@ -5654,25 +5655,10 @@ fn initHeaders(
             const ElfN = ct_class.ElfN();
             const target_endian = elf.targetEndian();
 
-            populate_phdrs: {
-                // Initially we will give every `PT_LOAD` segment this address. When we re-allocate
-                // segments in the virtual address space in `flushMoved` and `flushResized`, we will
-                // move some segments to higher addresses to prevent overlap. This address therefore
-                // becomes the image's "base address"; i.e. the first `PT_LOAD` segment will start
-                // at this address. The base address could eventually end up higher than this due to
-                // how we re-allocate the address space, but never lower.
-                const base_vaddr: u64 = switch (@"type") {
-                    .REL => break :populate_phdrs,
-                    .DYN => 0,
-                    .EXEC => switch (machine) {
-                        .AARCH64 => 0x200000,
-                        .LOONGARCH => 0x10000,
-                        .PPC64 => 0x10000000,
-                        .RISCV => 0x10000,
-                        .SPARCV9 => 0x100000,
-                        .X86_64 => 0x200000,
-                    },
-                };
+            if (@"type" != .REL) {
+                // Initially we will give every `PT_LOAD` segment the base address. They will be
+                // moved to non-overlapping addresses by `updateSegmentLoadAddresses`.
+                const base_vaddr: u64 = elf.baseLoadableSegmentVAddr();
 
                 // All `PT_LOAD` segments are given this `.@"align"`. However, to avoid bloating the
                 // binary, their *nodes* are not aligned to this boundary---ELF only requires that
@@ -6621,21 +6607,7 @@ fn initHeaders(
         },
     };
 
-    if (@"type" != .REL) switch (elf.targetSegmentLoadAddressRestrictions()) {
-        .none => {},
-        .data_last => switch (elf.phdrSlice()) {
-            inline else => |phdr| {
-                // Ensure that the segment after `.data` (if any) is not a loadable segment.
-                const next_phndx = phndx.data + 1;
-                if (next_phndx < phdr.len) {
-                    switch (elf.targetLoad(&phdr[next_phndx].type)) {
-                        .NULL, .LOAD => unreachable, // data segment should be the last loadable segment
-                        else => {},
-                    }
-                }
-            },
-        },
-    };
+    try elf.updateSegmentLoadAddresses();
 }
 
 pub fn startProgress(elf: *Elf, prog_node: std.Progress.Node) void {
@@ -7035,6 +7007,21 @@ fn ehdrType(elf: *const Elf) EhdrType {
     }
 }
 
+fn baseLoadableSegmentVAddr(elf: *const Elf) u64 {
+    return switch (elf.ehdrType()) {
+        .REL => unreachable,
+        .DYN => 0,
+        .EXEC => switch (elf.ehdrMachine()) {
+            .AARCH64 => 0x200000,
+            .LOONGARCH => 0x10000,
+            .PPC64 => 0x10000000,
+            .RISCV => 0x10000,
+            .SPARCV9 => 0x100000,
+            .X86_64 => 0x200000,
+        },
+    };
+}
+
 fn targetPtrSize(elf: *const Elf) u8 {
     return elf.identClass().size();
 }
@@ -7151,30 +7138,6 @@ fn targetDynsymHashInfo(elf: *const Elf) DynsymHashInfo {
     return switch (elf.ehdrMachine()) {
         else => .@"4",
         // TODO: Alpha and S390x will need to use either `."@4"` or `.@"8"` depending on `elf.identClass()`.
-    };
-}
-/// Specifies any restrictions the current target has regarding how segments are ordered in the
-/// virtual address space. Most targets do not have any such restrictions.
-fn targetSegmentLoadAddressRestrictions(elf: *const Elf) enum {
-    none,
-    /// The "mutable data" segment must be the last loadable segment in the virtual address space.
-    data_last,
-} {
-    return switch (elf.ehdrMachine()) {
-        .AARCH64,
-        .PPC64,
-        .RISCV,
-        .X86_64,
-        .LOONGARCH,
-        => .none,
-
-        // SPARC uses `R_SPARC_PC{10,22}` relocations to construct pointers to the GOT, but these
-        // relocations write an *unsigned* PC-relative offset. This cannot even be worked around by
-        // using a larger code model, because the crt `_start` assembly always uses these specific
-        // relocations. Therefore, to avoid relocation errors, all code must appear before the GOT
-        // in the virtual address space. The easiest way for us to do that is to ensure that the
-        // "mutable data" segment, containing the GOT, is the last segment in the address space.
-        .SPARCV9 => .data_last,
     };
 }
 fn targetLoad(elf: *const Elf, ptr: anytype) @typeInfo(@TypeOf(ptr)).pointer.child {
@@ -7606,6 +7569,7 @@ pub fn loadInput(elf: *Elf, input: link.Input) (link.Error || error{BadMagic})!v
             .{elf.mf.io_err.?},
         ),
     };
+    try elf.updateSegmentLoadAddresses();
 }
 fn loadInputInner(elf: *Elf, input: link.Input) (Error || error{BadMagic})!void {
     const comp = elf.base.comp;
@@ -8885,6 +8849,7 @@ pub fn prelink(elf: *Elf, prog_node: std.Progress.Node) link.Error!void {
         error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
         else => |e| return e,
     };
+    try elf.updateSegmentLoadAddresses();
 }
 fn prelinkInner(elf: *Elf) Error!void {
     const comp = elf.base.comp;
@@ -9038,6 +9003,7 @@ pub fn zcuFilesReady(elf: *Elf, zcu: *Zcu) link.Error!void {
             .{elf.mf.io_err.?},
         ),
     };
+    try elf.updateSegmentLoadAddresses();
 }
 fn zcuFilesReadyInner(elf: *Elf, zcu: *Zcu) Error!void {
     const gpa = zcu.gpa;
@@ -10327,6 +10293,7 @@ pub fn updateNav(elf: *Elf, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index) 
             .{elf.mf.io_err.?},
         ),
     };
+    try elf.updateSegmentLoadAddresses();
 }
 fn updateNavInner(elf: *Elf, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index) Error!void {
     const comp = elf.base.comp;
@@ -10416,6 +10383,7 @@ pub fn updateContainerType(
             .{elf.mf.io_err.?},
         ),
     };
+    try elf.updateSegmentLoadAddresses();
 }
 fn updateContainerTypeInner(
     elf: *Elf,
@@ -10557,6 +10525,7 @@ pub fn updateFunc(
             .{elf.mf.io_err.?},
         ),
     };
+    try elf.updateSegmentLoadAddresses();
 }
 fn updateFuncInner(
     elf: *Elf,
@@ -10804,6 +10773,7 @@ pub fn lostTracking(
             elf.mf.io_err.?,
         }),
     };
+    try elf.updateSegmentLoadAddresses();
 }
 
 pub fn updateErrorData(elf: *Elf, pt: Zcu.PerThread) link.Error!void {
@@ -10813,6 +10783,7 @@ pub fn updateErrorData(elf: *Elf, pt: Zcu.PerThread) link.Error!void {
     });
     if (elf.dwarf.const_pool.getIfExists(.anyerror_type)) |cpi|
         try elf.updateConstInner(pt, cpi, .anyerror_type, .complete);
+    try elf.updateSegmentLoadAddresses();
 }
 
 pub fn flush(
@@ -10859,6 +10830,8 @@ fn flushInner(
     }
 
     try elf.prepareDynamic();
+
+    try elf.updateSegmentLoadAddresses();
 
     while (try elf.idle()) {}
 
@@ -11566,9 +11539,10 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                         else => unreachable,
 
                         .NULL, .LOAD => {
-                            try elf.allocateSegmentLoadAddress(phndx);
-                            // Do not bubble moved---our child nodes only care if our virtual
-                            // address changes, which is handled by `updateSegmentLoadAddress`.
+                            // Our address changes are handled by `updateSegmentLoadAddresses`, so
+                            // there's nothing we need to do here. Don't bubble moved, because our
+                            // child nodes only care if our virtual address changes, which is
+                            // handled by that other function.
                             return;
                         },
 
@@ -11987,166 +11961,156 @@ fn flushMovedNobitsSymbols(
     }
 }
 
-/// Updates `vaddr` and `paddr` of the segment header, and marks everything in the segment as moved.
-fn updateSegmentLoadAddress(
-    elf: *Elf,
-    segment_ni: MappedFile.Node.Index,
-    new_vaddr: u64,
-) std.mem.Allocator.Error!void {
-    const phndx = elf.getNode(segment_ni).segment;
-
-    switch (elf.phdrSlice()) {
-        inline else => |phdr| {
-            assert(new_vaddr != elf.targetLoad(&phdr[phndx].vaddr));
-            elf.targetStore(&phdr[phndx].vaddr, @intCast(new_vaddr));
-            elf.targetStore(&phdr[phndx].paddr, @intCast(new_vaddr));
-        },
-    }
-
-    try segment_ni.childrenMoved(elf.base.comp.gpa, &elf.mf);
-    if (segment_ni == elf.ni.data) elf.bss_moved = true;
-}
-
-/// Given the index of a `PT_LOAD`/`PT_NULL` segment, assumes that the phdr's `offset` and `filesz`
-/// have been updated as needed by the caller, and updates the `@"align"`, `vaddr`, `paddr`, and
-/// `memsz` fields of the segment, in order to place it at a valid virtual address.
+/// If any loadable segments have invalid virtual addresses, assigns them new valid addresses and
+/// queues the necessary idle tasks (e.g. re-applying relocations targeting those segments).
 ///
-/// TODO: this function is currently a source of non-determinism in the linker, because handling the
-/// moving or resizing of a segment could reorder them and thereby affect how we handle *future*
-/// changes to segments.
-fn allocateSegmentLoadAddress(elf: *Elf, orig_phndx: u32) std.mem.Allocator.Error!void {
-    const segment_ni = elf.phdrs.items[orig_phndx].unwrap().?;
-    assert(elf.getNode(segment_ni).segment == orig_phndx);
-    const page_align = elf.targetPageAlign();
-    const node_align = segment_ni.alignment(&elf.mf);
-    const ph_align = page_align.max(node_align);
+/// This function must be called at the end of every link task in case tghe task invalidated segment
+/// addresses (which can happen in response to any node movement/resize, or any section resize). It
+/// cannot be called from `idle` as this function does not have the required idempotency guarantee
+/// so calling it non-deterministically it would lead to unreproducible output files.
+fn updateSegmentLoadAddresses(elf: *Elf) std.mem.Allocator.Error!void {
+    if (elf.ehdrType() == .REL) return;
 
-    // If we determine that the segment's virtual address needs to move, then it's a good idea to
-    // make it less likely that it needs to move *again* in the future, because it is expensive to
-    // change a segment's load address (a lot of re-flushing is necessary). To do that, we reserve
-    // more virtual address space than we need (multiplying the actual size by this value). That
-    // way, there will usually be padding between segments which they can grow into.
-    //
-    // TODO: we might want to decrease this multiplier, or even omit it entirely, in cases where
-    // virtual address space is constrained. For instance, 32-bit targets, or targets where short
-    // PC-relative relocations between segments are common.
-    const reserve_size_multiplier = 4;
+    const page_align = elf.targetPageAlign();
 
     switch (elf.phdrSlice()) {
         inline else => |phdr| {
-            const offset = elf.targetLoad(&phdr[orig_phndx].offset);
-            const filesz = elf.targetLoad(&phdr[orig_phndx].filesz);
-
-            const orig_vaddr = elf.targetLoad(&phdr[orig_phndx].vaddr);
-            assert(elf.targetLoad(&phdr[orig_phndx].paddr) == orig_vaddr);
-
-            const bss_size = if (segment_ni == elf.ni.data)
-                elf.shndx.bss.size(elf)
-            else
-                0;
-            const memsz = filesz + bss_size;
-
-            var vaddr: u64 = orig_vaddr;
-
-            elf.targetStore(&phdr[orig_phndx].@"align", @intCast(ph_align.toByteUnits()));
-            elf.targetStore(&phdr[orig_phndx].memsz, @intCast(memsz));
-            elf.targetStore(&phdr[orig_phndx].type, if (memsz > 0) .LOAD else .NULL);
-
-            // First, we will shift the virtual address as needed in order to maintain the required
-            // property that vaddr is congruent to offset modulo the phdr alignment.
-            {
-                // Compute the candidate address by undoing the current offset and then re-offsetting
-                vaddr = std.mem.alignBackward(u64, vaddr, ph_align.toByteUnits()) + offset % ph_align.toByteUnits();
-                // If `node_align` is greater than `page_align`, the address we just set might be in
-                // the previous segment. The first page we "own" is the one in which the old vaddr
-                // resides, so check against that.
-                const first_good_vaddr = std.mem.alignBackward(u64, orig_vaddr, page_align.toByteUnits());
-                if (vaddr < first_good_vaddr) {
-                    // Yep, we crossed into the previous segment's pages, so correct for that by
-                    // offsetting our address by another `ph_align`.
-                    vaddr += ph_align.toByteUnits();
-                    assert(vaddr >= first_good_vaddr);
+            // Somewhere in the phdrs is a contiguous sequence of all "loadable" segments (segments
+            // with a `type` of `PT_NULL` or `PT_LOAD`); find the start of that sequence. In theory
+            // we could memoize this, but there's no real need since the number of phdrs is tiny.
+            const load_phdrs_start = for (phdr, 0..) |*ph, phndx| {
+                switch (elf.targetLoad(&ph.type)) {
+                    .NULL, .LOAD => break phndx,
+                    else => continue,
                 }
-            }
+            } else unreachable; // we always create loadable (`PT_NULL`/`PT_LOAD`) segments
 
-            // If our size has changed, or if the address shift above caused our "end" address to
-            // cross a page boundary, then we might be overlapping with the next segment's pages. In
-            // that case, we will jump past that segment and give ourselves a new address after it.
-            // We'll need to repeat this for every loadable phdr after us, until we're no longer
-            // overlapping anything.
-            var phndx = orig_phndx;
-            for (phdr[orig_phndx + 1 ..], orig_phndx + 1..) |*next_ph, next_phndx| {
-                switch (elf.targetLoad(&next_ph.type)) {
+            // Update these fields for each loadable segment:
+            //
+            // * `memsz`
+            // * `type` (`PT_NULL` vs `PT_LOAD`)
+            // * `align`
+            // * `offset` (in theory this should happen in `updateElfOffset`, but this logic needs
+            //             to track that value, so it's easier to just populate it here instead)
+            //
+            // ...and check if the current `vaddr` values for the loadable segments are valid (i.e.
+            // compatible with the segments' file offsets and address ranges do not overlap).
+            var vaddrs_valid: bool = true;
+            var first_free_vaddr: u64 = elf.baseLoadableSegmentVAddr();
+            const load_phdrs_end: usize = for (
+                phdr[load_phdrs_start..],
+                elf.phdrs.items[load_phdrs_start..],
+                load_phdrs_start..,
+            ) |*ph, segment_oni, phndx| {
+                switch (elf.targetLoad(&ph.type)) {
                     .NULL, .LOAD => {},
-                    else => {
-                        // All loadable segments have contiguous indices, so this indicates we have
-                        // become the last loadable segment, meaning we definitely don't overlap any
-                        // other loadable segment.
-                        break;
-                    },
+                    else => break phndx, // reached end of loadable segments
                 }
+                const segment_ni = segment_oni.unwrap().?; // all loadable segments have nodes
 
-                const next_vaddr = elf.targetLoad(&next_ph.vaddr);
-                // Find the first virtual address which the next phdr "owns" by aligning its vaddr
-                // backwards to the start of the page.
-                const next_page_vaddr = std.mem.alignBackward(u64, next_vaddr, page_align.toByteUnits());
+                // We need to know the segment's file offset here anyway, so we may as well just
+                // populate the phdr `offset` field now instead of in `flushElfOffset`.
+                const ph_offset = elf.computeNodeElfOffset(segment_ni);
+                elf.targetStore(&ph.offset, @intCast(ph_offset));
 
-                // Check if the segment fits here. We apply `reserve_size_multiplier`, but only if
-                // the segment is already known to be moving---making it easier to grow in-place is
-                // the whole point of the multiplier!
-                {
-                    const target_size = if (vaddr == orig_vaddr) memsz else memsz * reserve_size_multiplier;
-                    if (vaddr + target_size <= next_page_vaddr) {
-                        break; // hooray, we fit here!
+                // The alignment of the segment affects which virtual addresses are valid.
+                const ph_align = segment_ni.alignment(&elf.mf).max(page_align);
+                elf.targetStore(&ph.@"align", @intCast(ph_align.toByteUnits()));
+
+                // The size of the segment in memory is equal to the size of the segment in the file
+                // plus the size of any `SHT_NOBITS` section(s) at the end of the segment.
+                const ph_memsz: u64 = memsz: {
+                    _, const file_size: u64 = segment_ni.location(&elf.mf).resolve(&elf.mf);
+                    if (segment_ni == elf.ni.data) {
+                        break :memsz file_size + elf.shndx.bss.size(elf);
+                    } else {
+                        break :memsz file_size;
                     }
+                };
+                elf.targetStore(&ph.memsz, @intCast(ph_memsz));
+                elf.targetStore(&ph.type, if (ph_memsz == 0) .NULL else .LOAD);
+
+                // Check if the existing virtual address of the segment is valid.
+                const ph_vaddr = elf.targetLoad(&ph.vaddr);
+                assert(elf.targetLoad(&ph.paddr) == ph_vaddr);
+                if (ph_vaddr < first_free_vaddr or
+                    ph_offset % ph_align.toByteUnits() != ph_vaddr % ph_align.toByteUnits())
+                {
+                    @branchHint(.unlikely);
+                    vaddrs_valid = false;
                 }
 
-                const next_ni = elf.phdrs.items[next_phndx].unwrap().?;
+                // The next segment's pages must not overlap our own.
+                first_free_vaddr = page_align.forward(ph_vaddr + ph_memsz);
+            } else phdr.len;
 
-                // This segment don't fit here, but before deciding how to proceed, we need to
-                // consider any target-specific restrictions we are subject to.
-                switch (elf.targetSegmentLoadAddressRestrictions()) {
-                    .none => {},
-                    .data_last => if (next_ni == elf.ni.data) {
-                        // We can't leapfrog over the data segment. Instead, that segment just needs
-                        // to be shifted forwards to make space for us, and we'll then `break` with
-                        // our current vaddr.
+            // There should be no more loadable segments after the contiguous range.
+            for (phdr[load_phdrs_end..]) |*ph| switch (elf.targetLoad(&ph.type)) {
+                .NULL, .LOAD => unreachable, // non-contiguous loadable segment
+                else => {},
+            };
 
-                        if (next_phndx + 1 < phdr.len) switch (elf.targetLoad(&phdr[next_phndx + 1].type)) {
-                            .NULL, .LOAD => unreachable, // data segment should be the last loadable segment
-                            else => {},
-                        };
-
-                        const free_vaddr = vaddr + memsz * reserve_size_multiplier;
-
-                        const next_align = page_align.max(next_ni.alignment(&elf.mf));
-                        const next_offset = elf.targetLoad(&next_ph.offset);
-                        const next_new_vaddr = next_align.forward(free_vaddr) + next_offset % next_align.toByteUnits();
-
-                        try elf.updateSegmentLoadAddress(next_ni, next_new_vaddr);
-
-                        break;
-                    },
-                }
-
-                // We don't fit here, so shift ourselves forward (i.e. swap with `next_phndx`). But
-                // first we need to adjust `vaddr` to come after it.
-                const next_size = elf.targetLoad(&next_ph.memsz);
-                // Instead of putting ourselves right after `next_ph`, we'll go a bit later in the
-                // address space so that `next_ph` has address space to grow into (like above).
-                vaddr = ph_align.forward(@intCast(next_vaddr + next_size * 4)) + offset % ph_align.toByteUnits();
-
-                // Now just swap the phdrs and update our `phndx`.
-                std.mem.swap(@TypeOf(next_ph.*), &phdr[phndx], next_ph);
-                elf.phdrs.items[phndx] = .wrap(next_ni);
-                elf.nodes.items(.data)[@backingInt(next_ni)] = .{ .segment = phndx };
-                elf.phdrs.items[next_phndx] = .wrap(segment_ni);
-                elf.nodes.items(.data)[@backingInt(segment_ni)] = .{ .segment = @intCast(next_phndx) };
-                phndx = @intCast(next_phndx);
+            if (vaddrs_valid) {
+                @branchHint(.likely);
+                return;
             }
 
-            if (vaddr != orig_vaddr) {
-                try elf.updateSegmentLoadAddress(segment_ni, vaddr);
+            // It's time to actually allocate virtual addresses for all segments. Our current
+            // strategy for this preserves the order of segments in memory, but this isn't a hard
+            // requirement in general.
+            //
+            // However, a warning! If this logic *is* ever changed to re-order segments, it may need
+            // to abide by target-specific restrictions. For instance, on SPARC, because the GOT is
+            // usually accessed with the unsigned relocations `R_SPARC_PC{10,22}`, it is effectively
+            // a requirement for all code to have a lower virtual address than the GOT, which means
+            // that the "text" segment must be ordered before the "data" segment on that target.
+
+            const gpa = elf.base.comp.gpa;
+
+            // If we determine that a segment's virtual address needs to move, then it's a good idea
+            // to space it out a bit from the surrounding segments, making it less likely that more
+            // segment moves are necessary in the future (because every segment movement invalidates
+            // a lot of idle work). We do that by multiplying each segment's size by this multiplier
+            // and treating that amount of space as "reserved" for the segment to grow into.
+            //
+            // TODO: we might want to decrease this multiplier, or even omit it entirely, in cases
+            // where the virtual address space is constrained; for instance, 32-bit targets, or
+            // targets where short PC-relative relocations between segments are common.
+            const reserve_size_multiplier = 4;
+
+            first_free_vaddr = elf.baseLoadableSegmentVAddr();
+            var preferred_vaddr = first_free_vaddr;
+
+            for (load_phdrs_start..load_phdrs_end) |phndx| {
+                const ph_align: Alignment = .fromByteUnits(elf.targetLoad(&phdr[phndx].@"align"));
+                assert(ph_align.compare(.gte, page_align));
+                const ph_offset = elf.targetLoad(&phdr[phndx].offset);
+                const ph_memsz = elf.targetLoad(&phdr[phndx].memsz);
+
+                // If the existing address is valid, then don't do anything.
+                const ph_vaddr: u64 = elf.targetLoad(&phdr[phndx].vaddr);
+                if (ph_vaddr >= first_free_vaddr and
+                    ph_vaddr % ph_align.toByteUnits() == ph_offset % ph_align.toByteUnits())
+                {
+                    // The current virtual address is already valid, so just stay put. Perhaps the
+                    // next segment will have to move, but the only alternative was *us* moving!
+                    first_free_vaddr = page_align.forward(ph_vaddr + ph_memsz);
+                    preferred_vaddr = page_align.forward(ph_vaddr + ph_memsz * reserve_size_multiplier);
+                    continue;
+                }
+
+                // Otherwise, put ourselves at a new address just after the previous segment.
+                const new_vaddr = ph_align.forward(preferred_vaddr) + ph_offset % ph_align.toByteUnits();
+                assert(new_vaddr != ph_vaddr); // `ph_vaddr` was not valid
+
+                elf.targetStore(&phdr[phndx].vaddr, @intCast(new_vaddr));
+                elf.targetStore(&phdr[phndx].paddr, @intCast(new_vaddr));
+                const segment_ni = elf.phdrs.items[phndx].unwrap().?;
+                try segment_ni.childrenMoved(gpa, &elf.mf);
+                if (segment_ni == elf.ni.data) elf.bss_moved = true;
+
+                first_free_vaddr = page_align.forward(new_vaddr + ph_memsz);
+                preferred_vaddr = page_align.forward(new_vaddr + ph_memsz * reserve_size_multiplier);
             }
         },
     }
@@ -12184,7 +12148,6 @@ fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
                     else => unreachable,
                     .NULL, .LOAD => {
                         elf.targetStore(&ph.filesz, @intCast(size));
-                        try elf.allocateSegmentLoadAddress(phndx);
                         if (ni == elf.ni.data) elf.bss_moved = true;
                     },
                     .DYNAMIC, .INTERP, .PHDR, .GNU_EH_FRAME, .GNU_RELRO => {
@@ -12197,7 +12160,11 @@ fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
 
                         elf.targetStore(&ph.filesz, @intCast(size));
 
-                        // Our memsz must include the `.tbss` section.
+                        // Our memsz must include the `.tbss` section. After adding that in, we will
+                        // realign to the TLS segment alignment. This is not strictly required, but
+                        // the TLS runtime will pad the module's TLS block to the segment alignment
+                        // anyway, so it's simpler for us to just make the memsz aligned so that our
+                        // memsz matches the size of the module's TLS block.
                         const tls_align: Alignment = .fromByteUnits(elf.targetLoad(&ph.@"align"));
                         elf.targetStore(&ph.memsz, @intCast(
                             tls_align.forward(size + elf.shndx.tbss.size(elf)),
@@ -12948,6 +12915,7 @@ pub fn updateExports(
         };
     }
     try elf.genPending(pt);
+    try elf.updateSegmentLoadAddresses();
 }
 fn updateExportInner(elf: *Elf, export_index: Zcu.Export.Index) Error!void {
     const zcu = elf.base.comp.zcu.?;
@@ -13122,15 +13090,8 @@ fn ensureSegmentAligned(elf: *Elf, start_phndx: u32, min_align: Alignment) Error
         switch (elf.phdrSlice()) {
             inline else => |phdr| switch (elf.targetLoad(&phdr[phndx].type)) {
                 .NULL, .LOAD => {
-                    // The `@"align"` field is managed by `allocateSegmentLoadAddress`.
-                    //
-                    // It's very likely that the node was moved and/or resized when we realigned it
-                    // just above, but it is possible that it was not moved *but* still has an
-                    // unaligned virtual address. In that case, we need to ensure the segment's
-                    // virtual address range will be recomputed.
-                    if (!min_align.check(@intCast(elf.targetLoad(&phdr[phndx].vaddr)))) {
-                        try seg_ni.moved(gpa, &elf.mf);
-                    }
+                    // The `@"align"` field is managed by `updateSegmentLoadAddresses`, which will
+                    // be called at the end of the current link task.
                 },
                 else => elf.targetStore(&phdr[phndx].@"align", @intCast(@max(
                     elf.targetLoad(&phdr[phndx].@"align"),
