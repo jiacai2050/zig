@@ -1727,7 +1727,14 @@ pub const Manifest = struct {
         pub fn format(this: @This(), w: *Io.Writer) Io.Writer.Error!void {
             switch (this) {
                 .none => return w.writeAll("none"),
-                else => |err, tag| return w.print("{t}: {t}", .{ tag, err }),
+
+                .open_file,
+                .open_dir,
+                .stat_file,
+                .stat_dir,
+                .read_file,
+                .read_dir,
+                => |err, tag| return w.print("{t}: {t}", .{ tag, err }),
             }
         }
     };
