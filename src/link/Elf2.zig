@@ -10936,9 +10936,12 @@ fn flushInner(
 
     try elf.mf.flush();
 
-    if (elf.options.enable_link_snapshots)
-        elf.dumpStderr() catch |err|
-            return diags.fail("dumping link snapshot failed: {t}", .{err});
+    if (elf.options.enable_link_snapshots) {
+        elf.dumpStderr() catch |err| switch (err) {
+            error.Canceled => |e| return e,
+            else => |e| return diags.fail("dumping link snapshot failed: {t}", .{e}),
+        };
+    }
 }
 
 pub fn idle(elf: *Elf) link.Error!bool {
