@@ -2336,6 +2336,7 @@ fn cacheCatOne(input_hex_digest: []const u8, contents: []const u8, writer: *Io.W
         try file_obj.field("digest", @as([]const u8, &hex_digest), .{});
         if (file.flags.is_directory) try file_obj.field("directory", true, .{});
         if (file.flags.metadata_only) try file_obj.field("metadata", true, .{});
+        if (!file.flags.exists) try file_obj.field("exists", false, .{});
         try file_obj.field("prefix", file.flags.prefix, .{});
         try file_obj.field("path", path, .{});
         try file_obj.end();
@@ -3370,7 +3371,12 @@ fn printStepStatus(maker: *Maker, step_index: Configuration.Step.Index, stderr: 
                         try writer.writeAll(" invalid_manifest");
                         try stderr.setColor(.green);
                     },
-                    .path_deleted, .directory_status_changed, .metadata_changed, .contents_changed => |path, tag| {
+                    .path_created,
+                    .path_deleted,
+                    .directory_status_changed,
+                    .metadata_changed,
+                    .contents_changed,
+                    => |path, tag| {
                         try stderr.setColor(.blue);
                         try writer.print(" {t}: {s}", .{ tag, path });
                         try stderr.setColor(.green);
