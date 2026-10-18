@@ -2137,6 +2137,7 @@ pub const UNWIND_ARM64_MODE = enum(u4) {
     FRAMELESS = 2,
     DWARF = 3,
     FRAME = 4,
+    FRAME_PAUTH_LR = 5,
 };
 
 pub const UNWIND_ARM64_FRAME_X19_X20_PAIR: u32 = 0x00000001;
