@@ -417,7 +417,7 @@ fn unwindFrameInner(si: *SelfInfo, io: Io, context: *UnwindContext) !usize {
                 const rules = try context.computeRules(gpa, dwarf, unwind.vmaddr_slide, encoding.value.arm64.dwarf);
                 return context.next(gpa, &rules);
             },
-            .FRAME => ip: {
+            .FRAME, .FRAME_PAUTH_LR => ip: {
                 const frame = encoding.value.arm64.frame;
 
                 const fp = (try dwarfRegNative(&context.cpu_state, fp_reg_num)).*;
