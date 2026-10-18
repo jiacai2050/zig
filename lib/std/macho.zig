@@ -2190,13 +2190,14 @@ pub const CompactUnwindEncoding = packed struct(u32) {
                     x25_x26: u1,
                     x27_x28: u1,
                 },
+                unused: u3 = 0,
                 d_reg_pairs: packed struct(u4) {
                     d8_d9: u1,
                     d10_d11: u1,
                     d12_d13: u1,
                     d14_d15: u1,
                 },
-                _: u15,
+                _: u12,
             },
             frameless: packed struct(u24) {
                 _: u12 = 0,
