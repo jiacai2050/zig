@@ -1175,6 +1175,16 @@ const targets = [_]ArchTarget{
             .name = "BPF",
             .td_name = "BPF",
         },
+        .feature_overrides = &.{
+            .{
+                .llvm_name = "dummy",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "dwarfris",
+                .omit = true,
+            },
+        },
     },
     .{
         .zig_name = "csky",
