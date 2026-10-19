@@ -1195,11 +1195,6 @@ const targets = [_]ArchTarget{
         .llvm = null,
         .extra_features = &.{
             .{
-                .zig_name = "64bit",
-                .desc = "Enable 64-bit PA-RISC 2.0",
-                .deps = &.{"v2_0"},
-            },
-            .{
                 .zig_name = "max_1",
                 .desc = "Enable MAX-1 multimedia acceleration extensions",
                 .deps = &.{},
@@ -1289,49 +1284,49 @@ const targets = [_]ArchTarget{
                 .llvm_name = null,
                 .zig_name = "pa_8000",
                 .features = &.{
-                    "64bit",
+                    "v2_0",
                 },
             },
             .{
                 .llvm_name = null,
                 .zig_name = "pa_8200",
                 .features = &.{
-                    "64bit",
+                    "v2_0",
                 },
             },
             .{
                 .llvm_name = null,
                 .zig_name = "pa_8500",
                 .features = &.{
-                    "64bit",
+                    "v2_0",
                 },
             },
             .{
                 .llvm_name = null,
                 .zig_name = "pa_8600",
                 .features = &.{
-                    "64bit",
+                    "v2_0",
                 },
             },
             .{
                 .llvm_name = null,
                 .zig_name = "pa_8700",
                 .features = &.{
-                    "64bit",
+                    "v2_0",
                 },
             },
             .{
                 .llvm_name = null,
                 .zig_name = "pa_8800",
                 .features = &.{
-                    "64bit",
+                    "v2_0",
                 },
             },
             .{
                 .llvm_name = null,
                 .zig_name = "pa_8900",
                 .features = &.{
-                    "64bit",
+                    "v2_0",
                 },
             },
         },
