@@ -2747,7 +2747,6 @@ pub const DynamicLinker = struct {
                         },
                     }),
 
-                    .hppa,
                     .m68k,
                     .microblaze,
                     .microblazeel,
@@ -2777,7 +2776,9 @@ pub const DynamicLinker = struct {
                         if (cpu.has(.mips, .nan2008)) "-linux-mipsn8" else "",
                     }),
 
-                    .powerpc => switch (abi) {
+                    .hppa,
+                    .powerpc,
+                    => switch (abi) {
                         .gnueabi,
                         .gnueabihf,
                         => init("/lib/ld.so.1"),
