@@ -614,98 +614,6 @@ const targets = [_]ArchTarget{
         .branch_quota = 10000,
         .feature_overrides = &.{
             .{
-                .llvm_name = "exynos",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "cortex-a78",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "cortex-a78ae",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "cortex-a710",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "cortex-m4",
-                .omit_deps = &.{"vfp4d16sp"},
-            },
-            .{
-                .llvm_name = "cortex-m7",
-                .omit_deps = &.{"fp_armv8d16"},
-            },
-            .{
-                .llvm_name = "cortex-m33",
-                .omit_deps = &.{ "fp_armv8d16sp", "dsp" },
-            },
-            .{
-                .llvm_name = "cortex-m35p",
-                .omit_deps = &.{ "fp_armv8d16sp", "dsp" },
-            },
-            .{
-                .llvm_name = "cortex-m55",
-                .omit_deps = &.{ "mve_fp", "fp_armv8d16" },
-            },
-            .{
-                .llvm_name = "cortex-m85",
-                .omit_deps = &.{ "mve_fp", "pacbti", "fp_armv8d16" },
-            },
-            .{
-                .llvm_name = "cortex-x1c",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "r4",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "r52plus",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "r5",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "r52",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "r7",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "m3",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "m7",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "krait",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "kryo",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "swift",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "cortex-x1",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "neoverse-v1",
-                .flatten = true,
-            },
-            .{
                 .llvm_name = "a5",
                 .flatten = true,
             },
@@ -777,6 +685,132 @@ const targets = [_]ArchTarget{
                 .llvm_name = "a78c",
                 .flatten = true,
             },
+            .{
+                .llvm_name = "cortex-a78",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "cortex-a78ae",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "cortex-a710",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "cortex-x1",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "cortex-x1c",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "exynos",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "krait",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "kryo",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "m3",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "m7",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "neoverse-v1",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "r4",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "r5",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "r7",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "r52",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "r52plus",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "swift",
+                .flatten = true,
+            },
+
+            .{
+                .llvm_name = "cortex-m4",
+                .omit_deps = &.{"vfp4d16sp"},
+            },
+            .{
+                .llvm_name = "cortex-m7",
+                .omit_deps = &.{"fp_armv8d16"},
+            },
+            .{
+                .llvm_name = "cortex-m33",
+                .omit_deps = &.{ "dsp", "fp_armv8d16sp" },
+            },
+            .{
+                .llvm_name = "cortex-m35p",
+                .omit_deps = &.{ "dsp", "fp_armv8d16sp" },
+            },
+            .{
+                .llvm_name = "cortex-m52",
+                .omit_deps = &.{ "fp_armv8d16", "mve_fp", "pacbti" },
+            },
+            .{
+                .llvm_name = "cortex-m55",
+                .omit_deps = &.{ "fp_armv8d16", "mve_fp" },
+            },
+            .{
+                .llvm_name = "cortex-m85",
+                .omit_deps = &.{ "fp_armv8d16", "mve_fp", "pacbti" },
+            },
+            .{
+                .llvm_name = "cortex-r5",
+                .omit_deps = &.{"vfp3d16"},
+            },
+            .{
+                .llvm_name = "cortex-r7",
+                .omit_deps = &.{ "fp16", "vfp3d16" },
+            },
+            .{
+                .llvm_name = "cortex-r8",
+                .omit_deps = &.{ "fp16", "vfp3d16" },
+            },
+            .{
+                .llvm_name = "cortex-r52",
+                .omit_deps = &.{ "fp_armv8", "neon" },
+            },
+            .{
+                .llvm_name = "cortex-r52plus",
+                .omit_deps = &.{ "fp_armv8", "neon" },
+            },
+            .{
+                .llvm_name = "star-mc1",
+                .omit_deps = &.{ "dsp", "fp_armv8d16sp" },
+            },
+            .{
+                .llvm_name = "star-mc3",
+                .omit_deps = &.{ "fp_armv8d16", "mve_fp", "pacbti" },
+            },
+
             .{
                 .llvm_name = "armv2",
                 .zig_name = "v2",

@@ -2285,12 +2285,10 @@ pub const cpu = struct {
         .name = "cortex_m52",
         .llvm_name = "cortex-m52",
         .features = featureSet(&[_]Feature{
-            .fp_armv8d16,
+            .dsp,
             .loop_align,
             .mve1beat,
-            .mve_fp,
             .no_branch_predictor,
-            .pacbti,
             .slowfpvmlx,
             .use_misched,
             .v8_1m_main,
@@ -2364,16 +2362,13 @@ pub const cpu = struct {
             .slowfpvfmx,
             .slowfpvmlx,
             .v7r,
-            .vfp3d16,
         }),
     };
     pub const cortex_r52: CpuModel = .{
         .name = "cortex_r52",
         .llvm_name = "cortex-r52",
         .features = featureSet(&[_]Feature{
-            .fp_armv8,
             .fpao,
-            .neon,
             .use_misched,
             .v8r,
         }),
@@ -2382,9 +2377,7 @@ pub const cpu = struct {
         .name = "cortex_r52plus",
         .llvm_name = "cortex-r52plus",
         .features = featureSet(&[_]Feature{
-            .fp_armv8,
             .fpao,
-            .neon,
             .use_misched,
             .v8r,
         }),
@@ -2394,7 +2387,6 @@ pub const cpu = struct {
         .llvm_name = "cortex-r7",
         .features = featureSet(&[_]Feature{
             .avoid_partial_cpsr,
-            .fp16,
             .hwdiv_arm,
             .mp,
             .ret_addr_stack,
@@ -2402,7 +2394,6 @@ pub const cpu = struct {
             .slowfpvfmx,
             .slowfpvmlx,
             .v7r,
-            .vfp3d16,
         }),
     };
     pub const cortex_r8: CpuModel = .{
@@ -2410,7 +2401,6 @@ pub const cpu = struct {
         .llvm_name = "cortex-r8",
         .features = featureSet(&[_]Feature{
             .avoid_partial_cpsr,
-            .fp16,
             .hwdiv_arm,
             .mp,
             .ret_addr_stack,
@@ -2418,7 +2408,6 @@ pub const cpu = struct {
             .slowfpvfmx,
             .slowfpvmlx,
             .v7r,
-            .vfp3d16,
         }),
     };
     pub const cortex_x1: CpuModel = .{
@@ -2666,9 +2655,7 @@ pub const cpu = struct {
         .llvm_name = "star-mc1",
         .features = featureSet(&[_]Feature{
             .avoid_muls,
-            .dsp,
             .fix_cmse_cve_2021_35465,
-            .fp_armv8d16sp,
             .loop_align,
             .no_branch_predictor,
             .slowfpvfmx,
@@ -2681,12 +2668,10 @@ pub const cpu = struct {
         .name = "star_mc3",
         .llvm_name = "star-mc3",
         .features = featureSet(&[_]Feature{
-            .fp_armv8d16,
+            .dsp,
             .loop_align,
             .mve1beat,
-            .mve_fp,
             .no_branch_predictor,
-            .pacbti,
             .slowfpvmlx,
             .use_misched,
             .v8_1m_main,
