@@ -2086,7 +2086,7 @@ pub const Cpu = struct {
         /// `Os.Tag.freestanding`.
         pub fn baseline(arch: Arch, os: Os) *const Model {
             return switch (arch) {
-                .alpha => &alpha.cpu.ev6,
+                .alpha => &alpha.cpu.ev56,
                 .amdgcn => &amdgcn.cpu.gfx906,
                 .arm => switch (os.tag) {
                     .@"3ds" => &arm.cpu.mpcore,
