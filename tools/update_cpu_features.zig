@@ -2096,6 +2096,49 @@ const targets = [_]ArchTarget{
             .name = "XCore",
             .td_name = "XCore",
         },
+        .extra_features = &.{
+            .{
+                .zig_name = "xs2",
+                .desc = "Enable XS2 architecture",
+                .deps = &.{},
+            },
+            .{
+                .zig_name = "xs3",
+                .desc = "Enable XS3 architecture",
+                .deps = &.{"xs2"},
+            },
+            .{
+                .zig_name = "fpu",
+                .desc = "Enable single-precision floating point unit",
+                .deps = &.{"xs3"},
+            },
+            .{
+                .zig_name = "vpu",
+                .desc = "Enable vector processing unit",
+                .deps = &.{"xs3"},
+            },
+        },
+        .extra_cpus = &.{
+            .{
+                .llvm_name = null,
+                .zig_name = "xs1b",
+                .features = &.{},
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "xs2a",
+                .features = &.{"xs2"},
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "xs3a",
+                .features = &.{ "fpu", "vpu" },
+            },
+        },
+        .omit_cpus = &.{
+            "generic",
+            "xs1b-generic",
+        },
     },
     .{
         .zig_name = "xtensa",

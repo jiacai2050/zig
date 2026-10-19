@@ -2070,6 +2070,7 @@ pub const Cpu = struct {
                 .x86_16 => &x86.cpu.i86,
                 .x86 => &x86.cpu.i386,
                 .x86_64 => &x86.cpu.x86_64,
+                .xcore => &xcore.cpu.xs1b,
                 inline else => |a| &@field(Target, @tagName(a.family())).cpu.generic,
             };
         }
@@ -2157,7 +2158,6 @@ pub const Cpu = struct {
                     .ps5 => &x86.cpu.znver2,
                     else => generic(arch),
                 },
-                .xcore => &xcore.cpu.xs1b_generic,
                 .xtensa => &xtensa.cpu.esp32,
                 .wasm32, .wasm64 => &wasm.cpu.lime1,
 
