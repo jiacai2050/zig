@@ -1192,6 +1192,85 @@ const targets = [_]ArchTarget{
             .name = "CSKY",
             .td_name = "CSKY",
         },
+        .feature_overrides = &.{
+            .{
+                .llvm_name = "ccrt",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "constpool",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "multiple_stld",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "nvic",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "pushpop",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "smart",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "soft_tp",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "stack_size",
+                .omit = true,
+            },
+
+            .{
+                .llvm_name = "ck801",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "ck802",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "ck803",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "ck803s",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "ck804",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "ck805",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "ck807",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "ck810",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "ck810v",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "ck860",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "ck860v",
+                .flatten = true,
+            },
+        },
     },
     .{
         .zig_name = "hexagon",
