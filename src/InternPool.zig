@@ -7901,7 +7901,7 @@ pub fn get(ip: *InternPool, gpa: Allocator, io: Io, tid: Zcu.PerThread.Id, key: 
                 switch (aggregate.storage) {
                     .bytes => |bytes| for (bytes.toSlice(len, ip)[1..]) |byte|
                         if (byte != bytes.at(0, ip)) break :repeated,
-                    .elems => |elems| for (elems[1..@intCast(len)]) |elem|
+                    .elems => |elems| for (elems[1..@intCast(len_including_sentinel)]) |elem|
                         if (elem != elems[0]) break :repeated,
                     .repeated_elem => {},
                 }
