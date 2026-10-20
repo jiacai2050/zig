@@ -2066,6 +2066,7 @@ pub const Cpu = struct {
                 .riscv64, .riscv64be => &riscv.cpu.generic_rv64,
                 .sparc => &sparc.cpu.v7,
                 .sparc64 => &sparc.cpu.v9, // SPARC can only be 64-bit from v9 and up.
+                .ve => &ve.cpu.ve10,
                 .wasm32, .wasm64 => &wasm.cpu.mvp,
                 .x86_16 => &x86.cpu.i86,
                 .x86 => &x86.cpu.i386,

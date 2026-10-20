@@ -1737,6 +1737,33 @@ const targets = [_]ArchTarget{
             .name = "VE",
             .td_name = "VE",
         },
+        .extra_features = &.{
+            .{
+                .zig_name = "ve3",
+                .desc = "Enable VE3 instructions",
+                .deps = &.{},
+            },
+        },
+        .extra_cpus = &.{
+            .{
+                .llvm_name = null,
+                .zig_name = "ve10",
+                .features = &.{"vpu"},
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "ve20",
+                .features = &.{"vpu"},
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "ve30",
+                .features = &.{ "ve3", "vpu" },
+            },
+        },
+        .omit_cpus = &.{
+            "generic",
+        },
     },
     .{
         .zig_name = "wasm",
