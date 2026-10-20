@@ -1752,8 +1752,16 @@ const targets = [_]ArchTarget{
                 .extra_deps = &.{"bulk_memory_opt"},
             },
             .{
+                .llvm_name = "f16",
+                .extra_deps = &.{"simd128"},
+            },
+            .{
                 .llvm_name = "reference-types",
-                .extra_deps = &.{"call_indirect_overlong"},
+                .extra_deps = &.{ "bulk_memory", "call_indirect_overlong" },
+            },
+            .{
+                .llvm_name = "relaxed-simd",
+                .extra_deps = &.{"simd128"},
             },
         },
         .extra_features = &.{

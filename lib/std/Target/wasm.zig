@@ -114,6 +114,7 @@ pub const all_features = blk: {
         .llvm_name = "reference-types",
         .description = "Enable reference types",
         .dependencies = featureSet(&[_]Feature{
+            .bulk_memory,
             .call_indirect_overlong,
         }),
     };
@@ -125,7 +126,9 @@ pub const all_features = blk: {
     result[@backingInt(Feature.relaxed_simd)] = .{
         .llvm_name = "relaxed-simd",
         .description = "Enable relaxed-simd instructions",
-        .dependencies = featureSet(&[_]Feature{}),
+        .dependencies = featureSet(&[_]Feature{
+            .simd128,
+        }),
     };
     result[@backingInt(Feature.sign_ext)] = .{
         .llvm_name = "sign-ext",
