@@ -861,12 +861,15 @@ pub fn computedPackageHash(f: *const Fetch) Package.Hash {
         const version: []const u8 = std.mem.print(&version_buffer, "{f}", .{man.version}) catch &version_buffer;
         return .init(f.computed_hash.digest, man.name, version, man.id, saturated_size);
     }
+    // Previous version of Zig did not use f.name to affect the package hash, so
+    // allow the user to opt in by only doing that if they specify a version.
     var version_buffer: [Manifest.max_version_len]u8 = undefined;
-    const v: []const u8 = if (f.parent_specified_version_tok != .none)
-        std.mem.print(&version_buffer, "{f}", .{f.parent_specified_version}) catch unreachable
-    else
-        "V";
-    return .init(f.computed_hash.digest, f.name, v, 0xffff, saturated_size);
+    if (f.parent_specified_version_tok != .none) {
+        const v = std.mem.print(&version_buffer, "{f}", .{f.parent_specified_version}) catch unreachable;
+        return .init(f.computed_hash.digest, f.name, v, 0xffff, saturated_size);
+    } else {
+        return .init(f.computed_hash.digest, "N", "V", 0xffff, saturated_size);
+    }
 }
 
 /// `computeHash` gets a free check for the existence of `build.zig`, but when
