@@ -208,29 +208,24 @@ navs: std.array_hash_map.Auto(InternPool.Nav.Index, struct {
     lsi: Symbol.LocalIndex,
     /// The start index of the contiguous sequence of symbol relocations in this NAV.
     first_symbol_reloc: SymbolReloc.Index,
-    /// The start index of the contiguous sequence of GOT relocations in this NAV.
-    first_got_reloc: GotReloc.Index,
 }),
 uavs: std.array_hash_map.Auto(InternPool.Index, struct {
     lsi: Symbol.LocalIndex,
     /// The start index of the contiguous sequence of symbol relocations in this UAV.
     first_symbol_reloc: SymbolReloc.Index,
-    // No `first_got_reloc` field because a UAV never contains GOT relocations.
 }),
 lazy: std.EnumArray(link.File.LazySymbol.Kind, struct {
     map: std.array_hash_map.Auto(InternPool.Index, struct {
         lsi: Symbol.LocalIndex,
         /// The start index of the contiguous sequence of symbol relocations in this lazy code/data.
         first_symbol_reloc: SymbolReloc.Index,
-        /// The start index of the contiguous sequence of GOT relocations in this lazy code/data.
-        first_got_reloc: GotReloc.Index,
     }),
     pending_index: u32,
 }),
 pending_uavs: std.ArrayList(Node.UavMapIndex),
 symbol_relocs: std.ArrayList(SymbolReloc),
 node_relocs: std.ArrayList(NodeReloc),
-got_relocs: std.ArrayList(GotReloc),
+got_relocs: std.array_hash_map.Auto(SymbolReloc.Index, void),
 /// Set of relocations which must be re-applied if the size of the TLS segment changes.
 tls_size_symbol_relocs: std.array_hash_map.Auto(SymbolReloc.Index, void),
 /// Index matches the index into `shdrs`. Like `shdrs`, this map excludes `SHN_UNDEF`.
@@ -388,9 +383,6 @@ const Node = union(enum) {
         fn firstSymbolReloc(nmi: NavMapIndex, elf: *const Elf) SymbolReloc.Index {
             return elf.navs.values()[@backingInt(nmi)].first_symbol_reloc;
         }
-        fn firstGotReloc(nmi: NavMapIndex, elf: *const Elf) GotReloc.Index {
-            return elf.navs.values()[@backingInt(nmi)].first_got_reloc;
-        }
     };
 
     pub const UavMapIndex = enum(u32) {
@@ -406,11 +398,6 @@ const Node = union(enum) {
 
         fn firstSymbolReloc(umi: UavMapIndex, elf: *const Elf) SymbolReloc.Index {
             return elf.uavs.values()[@backingInt(umi)].first_symbol_reloc;
-        }
-        fn firstGotReloc(umi: UavMapIndex, elf: *const Elf) GotReloc.Index {
-            _ = umi;
-            _ = elf;
-            return .none;
         }
     };
 
@@ -436,9 +423,6 @@ const Node = union(enum) {
 
                 fn firstSymbolReloc(lmi: @This(), elf: *const Elf) SymbolReloc.Index {
                     return elf.lazy.getPtrConst(kind).map.values()[@backingInt(lmi)].first_symbol_reloc;
-                }
-                fn firstGotReloc(lmi: @This(), elf: *const Elf) GotReloc.Index {
-                    return elf.lazy.getPtrConst(kind).map.values()[@backingInt(lmi)].first_got_reloc;
                 }
             };
         }
@@ -603,8 +587,6 @@ const InputSection = struct {
     node: MappedFile.Node.Index,
     /// The start index of the contiguous sequence of symbol relocations in this input section.
     first_symbol_reloc: SymbolReloc.Index,
-    /// The start index of the contiguous sequence of GOT relocations in this input section.
-    first_got_reloc: GotReloc.Index,
 
     const Index = enum(u32) {
         _,
@@ -1387,14 +1369,29 @@ const SymbolReloc = struct {
     node: MappedFile.Node.Index.Optional,
     /// The offset of the relocation inside of `node`.
     offset: u64,
-    /// A symbol used to compute the relocated value. Precise meaning depends on `@"type"`.
-    target: Symbol.Id,
-    /// A signed constant used to compute the relocated value. Precise meaning depends on `@"type"`.
+    /// A symbol used to compute the relocated value. Precise meaning depends on `bits.@"type"`.
+    target_symbol: Symbol.Id,
+    /// A signed constant used to compute the relocated value. Precise meaning depends on `bits.@"type"`.
     addend: SymbolReloc.Addend,
-    /// Specifies how to apply the relocation.
-    ///
-    /// When emitting a relocatable, this field is `undefined`.
-    type: SymbolReloc.Type,
+    bits: packed struct(u32) {
+        /// Specifies how to apply the relocation.
+        ///
+        /// When emitting a relocatable, this field is `undefined`.
+        type: SymbolReloc.Type,
+
+        result: enum(u3) {
+            ok,
+            overflowed,
+            misaligned,
+            illegal_dynamic_type,
+            illegal_dynamic_section,
+        },
+
+        /// ~~mystery bits~~
+        /// what will MLUGG use them for?
+        /// nobody knows
+        _: u11 = 0,
+    },
     /// Forms a linked list of all symbol relocations with the same `target`. This list exists so
     /// that all relocations targeting a particular symbol can be re-applied if that symbol moves.
     /// Doubly-linked so that relocations can be removed.
@@ -1412,13 +1409,6 @@ const SymbolReloc = struct {
     /// relocation entry. The entry will be removed if we discover a definition which allows us to
     /// statically resolve the relocation.
     rela_index: Section.RelaIndex.Optional,
-    result: enum(u8) {
-        ok,
-        overflowed,
-        misaligned,
-        illegal_dynamic_type,
-        illegal_dynamic_section,
-    },
 
     /// Determines the section in which this relocation will be placed if it is outstanding.
     ///
@@ -1464,7 +1454,7 @@ const SymbolReloc = struct {
     /// relocations which write multiple sequences of bits or which need to do unusual arithmetic on
     /// a symbol value. The representation is simply a big enum containing all of these exceptional
     /// cases---see `Special`. This representation is in use when `Type.target == .special`.
-    const Type = packed struct(u16) {
+    const Type = packed struct(u18) {
         /// Helper function for constructing a "simple" relocation type. This mainly exists to
         /// improve readability in the relocation lowering logic in `addRelocAssumeCapacity`.
         fn simple(target: Target, action: Simple) SymbolReloc.Type {
@@ -1493,7 +1483,7 @@ const SymbolReloc = struct {
         /// Otherwise (for "simple" relocations), `Target` indicates the first step in computing the
         /// relocation---whether we care about the target symbol's absolute address, its PC-relative
         /// address, its PLT entry, etc.
-        const Target = enum(u3) {
+        const Target = enum(u5) {
             /// This is a "special" relocation whose specific type is in the `action.special` field.
             special,
 
@@ -1501,6 +1491,7 @@ const SymbolReloc = struct {
             abs,
             /// Offset from the relocation itself to the target symbol ("PC-relative").
             rel,
+
             /// Address of the target symbol's PLT entry.
             ///
             /// If the target symbol does not have a PLT entry, equivalent to `.abs`.
@@ -1509,12 +1500,35 @@ const SymbolReloc = struct {
             ///
             /// If the target symbol does not have a PLT entry, equivalent to `.rel`.
             pltrel,
+
             /// Offset of the target TLS symbol from the base of this DSO's own TLS region.
             dtpoff,
             /// Offset of the target TLS symbol from the raw thread pointer.
             tpoff,
+
             /// Size of the target symbol.
             size,
+
+            /// Address of the GOT entry with key `.{ .symbol = target_symbol }`.
+            gotabs_symbol,
+            /// Offset from the relocation to the GOT entry with key `.{ .symbol = target_symbol }`.
+            gotrel_symbol,
+            /// Offset from the GOT base to the GOT entry with key `.{ .symbol = target_symbol }`.
+            gotoff_symbol,
+
+            /// Address of the GOT entry with key `.{ .tpoff = target_symbol }`.
+            gotabs_tpoff,
+            /// Offset from the relocation to the GOT entry with key `.{ .tpoff = target_symbol }`.
+            gotrel_tpoff,
+            /// Offset from the GOT base to the GOT entry with key `.{ .tpoff = target_symbol }`.
+            gotoff_tpoff,
+
+            /// Address of the GOT entry with key `.{ .tlsgd0 = target_symbol }`.
+            gotabs_tlsgd,
+            /// Offset from the relocation to the GOT entry with key `.{ .tlsgd0 = target_symbol }`.
+            gotrel_tlsgd,
+            /// Offset from the GOT base to the GOT entry with key `.{ .tlsgd0 = target_symbol }`.
+            gotoff_tlsgd,
         };
 
         /// For a "simple" relocation, after the initial value is computed according to `Target`, a
@@ -1701,17 +1715,22 @@ const SymbolReloc = struct {
             larch_b21,
             larch_b26,
             larch_call36,
+            larch_got_pcala_hi20,
+            larch_got_pcala64_lo20,
+            larch_got_pcala64_hi12,
 
             sparc_olo10,
             sparc_hix22,
             sparc_le_hix22,
             sparc_wdisp10,
             sparc_wdisp16,
+            sparc_got_op_lox10,
+            sparc_got_op_hix22,
 
             fn applyInner(
                 s: Special,
                 elf: *Elf,
-                target: Symbol.Id,
+                target_sym: Symbol.Id,
                 addend: SymbolReloc.Addend,
                 dest_vaddr: u64,
                 dest_slice: []u8,
@@ -1719,7 +1738,7 @@ const SymbolReloc = struct {
                 const normal_addend: u64 = @bitCast(addend.normal);
                 switch (s) {
                     .larch_pcala_hi20 => {
-                        const val = target.value(elf) +% normal_addend;
+                        const val = target_sym.value(elf) +% normal_addend;
                         const inst: *align(1) link.loongarch.J20 = @ptrCast(dest_slice[0..4]);
                         elf.targetStore(inst, .{
                             .b0_4 = elf.targetLoad(inst).b0_4,
@@ -1728,7 +1747,7 @@ const SymbolReloc = struct {
                         });
                     },
                     .larch_pcala64_lo20 => {
-                        const val = target.value(elf) +% normal_addend;
+                        const val = target_sym.value(elf) +% normal_addend;
                         const inst: *align(1) link.loongarch.J20 = @ptrCast(dest_slice[0..4]);
                         elf.targetStore(inst, .{
                             .b0_4 = elf.targetLoad(inst).b0_4,
@@ -1737,7 +1756,7 @@ const SymbolReloc = struct {
                         });
                     },
                     .larch_pcala64_hi12 => {
-                        const val = target.value(elf) +% normal_addend;
+                        const val = target_sym.value(elf) +% normal_addend;
                         const inst: *align(1) link.loongarch.K12 = @ptrCast(dest_slice[0..4]);
                         elf.targetStore(inst, .{
                             .b0_9 = elf.targetLoad(inst).b0_9,
@@ -1746,7 +1765,7 @@ const SymbolReloc = struct {
                         });
                     },
                     .larch_b21, .larch_b26, .larch_call36 => {
-                        const target_vaddr: u64 = elf.pltEntryTargetAddr(target) orelse target.value(elf);
+                        const target_vaddr: u64 = elf.pltEntryTargetAddr(target_sym) orelse target_sym.value(elf);
                         const jump_offset: i64 = @bitCast(target_vaddr +% normal_addend -% dest_vaddr);
                         if ((jump_offset >> 2) << 2 != jump_offset) {
                             return error.RelocationMisaligned;
@@ -1806,9 +1825,43 @@ const SymbolReloc = struct {
                         }
                     },
 
+                    .larch_got_pcala_hi20 => {
+                        const got_vaddr = elf.shndx.got.vaddr(elf);
+                        const got_offset = elf.got.getIndex(.{ .symbol = target_sym }).? * elf.targetPtrSize();
+                        const val = got_vaddr +% got_offset +% normal_addend;
+                        const inst: *align(1) link.loongarch.J20 = @ptrCast(dest_slice[0..4]);
+                        elf.targetStore(inst, .{
+                            .b0_4 = elf.targetLoad(inst).b0_4,
+                            .j20 = link.loongarch.pcalaHi20(val, dest_vaddr),
+                            .b25_31 = elf.targetLoad(inst).b25_31,
+                        });
+                    },
+                    .larch_got_pcala64_lo20 => {
+                        const got_vaddr = elf.shndx.got.vaddr(elf);
+                        const got_offset = elf.got.getIndex(.{ .symbol = target_sym }).? * elf.targetPtrSize();
+                        const val = got_vaddr +% got_offset +% normal_addend;
+                        const inst: *align(1) link.loongarch.J20 = @ptrCast(dest_slice[0..4]);
+                        elf.targetStore(inst, .{
+                            .b0_4 = elf.targetLoad(inst).b0_4,
+                            .j20 = link.loongarch.pcala64Lo20(val, dest_vaddr),
+                            .b25_31 = elf.targetLoad(inst).b25_31,
+                        });
+                    },
+                    .larch_got_pcala64_hi12 => {
+                        const got_vaddr = elf.shndx.got.vaddr(elf);
+                        const got_offset = elf.got.getIndex(.{ .symbol = target_sym }).? * elf.targetPtrSize();
+                        const val = got_vaddr +% got_offset +% normal_addend;
+                        const inst: *align(1) link.loongarch.K12 = @ptrCast(dest_slice[0..4]);
+                        elf.targetStore(inst, .{
+                            .b0_9 = elf.targetLoad(inst).b0_9,
+                            .k12 = link.loongarch.pcala64Hi12(val, dest_vaddr),
+                            .b22_31 = elf.targetLoad(inst).b22_31,
+                        });
+                    },
+
                     .sparc_olo10 => {
                         const addends = addend.sparc_olo10;
-                        const lo10: i64 = @as(u10, @truncate(target.value(elf) +% addends.a));
+                        const lo10: i64 = @as(u10, @truncate(target_sym.value(elf) +% addends.a));
                         const simm13 = std.math.cast(i13, lo10 + addends.o) orelse return error.RelocationOverflow;
                         const dest_ptr: *align(1) packed struct(u32) {
                             simm13: u13,
@@ -1825,7 +1878,7 @@ const SymbolReloc = struct {
                             b22_31: u10,
                         } = @ptrCast(dest_slice);
                         elf.targetStore(dest_ptr, .{
-                            .imm22 = @truncate(~(target.value(elf) +% normal_addend) >> 10),
+                            .imm22 = @truncate(~(target_sym.value(elf) +% normal_addend) >> 10),
                             .b22_31 = elf.targetLoad(dest_ptr).b22_31,
                         });
                     },
@@ -1842,12 +1895,12 @@ const SymbolReloc = struct {
                             b22_31: u10,
                         } = @ptrCast(dest_slice);
                         elf.targetStore(dest_ptr, .{
-                            .imm22 = @truncate(~(target.value(elf) +% normal_addend -% tls_size) >> 10),
+                            .imm22 = @truncate(~(target_sym.value(elf) +% normal_addend -% tls_size) >> 10),
                             .b22_31 = elf.targetLoad(dest_ptr).b22_31,
                         });
                     },
                     .sparc_wdisp16, .sparc_wdisp10 => {
-                        const target_vaddr: u64 = elf.pltEntryTargetAddr(target) orelse target.value(elf);
+                        const target_vaddr: u64 = elf.pltEntryTargetAddr(target_sym) orelse target_sym.value(elf);
                         const jump_offset: i64 = @bitCast(target_vaddr +% normal_addend -% dest_vaddr);
                         if ((jump_offset >> 2) << 2 != jump_offset) {
                             return error.RelocationMisaligned;
@@ -1897,9 +1950,119 @@ const SymbolReloc = struct {
                             else => unreachable,
                         }
                     },
+
+                    .sparc_got_op_lox10 => {
+                        const got_offset = elf.got.getIndex(.{ .symbol = target_sym }).? * elf.targetPtrSize();
+                        const dest_ptr: *align(1) packed struct(u32) {
+                            imm13: u13,
+                            b13_31: u19,
+                        } = @ptrCast(dest_slice);
+                        elf.targetStore(dest_ptr, .{
+                            .imm13 = @as(u10, @truncate(got_offset)),
+                            .b13_31 = elf.targetLoad(dest_ptr).b13_31,
+                        });
+                    },
+                    .sparc_got_op_hix22 => {
+                        const got_offset = elf.got.getIndex(.{ .symbol = target_sym }).? * elf.targetPtrSize();
+                        const dest_ptr: *align(1) packed struct(u32) {
+                            imm22: u22,
+                            b22_31: u10,
+                        } = @ptrCast(dest_slice);
+                        elf.targetStore(dest_ptr, .{
+                            .imm22 = @truncate(got_offset >> 10),
+                            .b22_31 = elf.targetLoad(dest_ptr).b22_31,
+                        });
+                    },
                 }
             }
         };
+
+        fn needsGotEntry(t: SymbolReloc.Type) ?enum { symbol, tpoff, tlsgd } {
+            return switch (t.target) {
+                .abs,
+                .rel,
+                .pltabs,
+                .pltrel,
+                .dtpoff,
+                .tpoff,
+                .size,
+                => null,
+
+                .gotabs_symbol, .gotrel_symbol, .gotoff_symbol => .symbol,
+                .gotabs_tpoff, .gotrel_tpoff, .gotoff_tpoff => .tpoff,
+                .gotabs_tlsgd, .gotrel_tlsgd, .gotoff_tlsgd => .tlsgd,
+
+                .special => switch (t.action.special) {
+                    .larch_pcala_hi20,
+                    .larch_pcala64_lo20,
+                    .larch_pcala64_hi12,
+                    .larch_b21,
+                    .larch_b26,
+                    .larch_call36,
+                    .sparc_olo10,
+                    .sparc_hix22,
+                    .sparc_le_hix22,
+                    .sparc_wdisp10,
+                    .sparc_wdisp16,
+                    => null,
+
+                    .larch_got_pcala_hi20,
+                    .larch_got_pcala64_lo20,
+                    .larch_got_pcala64_hi12,
+                    .sparc_got_op_lox10,
+                    .sparc_got_op_hix22,
+                    => .symbol,
+                },
+            };
+        }
+
+        fn dependsOnGotAddress(t: SymbolReloc.Type) bool {
+            return switch (t.target) {
+                .abs,
+                .rel,
+                .pltabs,
+                .pltrel,
+                .dtpoff,
+                .tpoff,
+                .size,
+                => false,
+
+                .gotabs_symbol,
+                .gotrel_symbol,
+                .gotabs_tpoff,
+                .gotrel_tpoff,
+                .gotabs_tlsgd,
+                .gotrel_tlsgd,
+                => true,
+
+                .gotoff_symbol,
+                .gotoff_tpoff,
+                .gotoff_tlsgd,
+                => false,
+
+                .special => switch (t.action.special) {
+                    .larch_pcala_hi20,
+                    .larch_pcala64_lo20,
+                    .larch_pcala64_hi12,
+                    .larch_b21,
+                    .larch_b26,
+                    .larch_call36,
+                    .sparc_olo10,
+                    .sparc_hix22,
+                    .sparc_le_hix22,
+                    .sparc_wdisp10,
+                    .sparc_wdisp16,
+                    => false,
+
+                    .larch_got_pcala_hi20,
+                    .larch_got_pcala64_lo20,
+                    .larch_got_pcala64_hi12,
+                    .sparc_got_op_lox10,
+                    .sparc_got_op_hix22,
+                    => true,
+                },
+            };
+        }
 
         fn dependsOnTlsSize(t: SymbolReloc.Type, elf: *const Elf) bool {
             return switch (elf.targetTlsVariant()) {
@@ -1917,6 +2080,15 @@ const SymbolReloc = struct {
                     .pltrel,
                     .dtpoff,
                     .size,
+                    .gotabs_symbol,
+                    .gotrel_symbol,
+                    .gotoff_symbol,
+                    .gotabs_tpoff,
+                    .gotrel_tpoff,
+                    .gotoff_tpoff,
+                    .gotabs_tlsgd,
+                    .gotrel_tlsgd,
+                    .gotoff_tlsgd,
                     => false,
 
                     .tpoff => true,
@@ -1931,11 +2103,16 @@ const SymbolReloc = struct {
                         .larch_b21,
                         .larch_b26,
                         .larch_call36,
+                        .larch_got_pcala_hi20,
+                        .larch_got_pcala64_lo20,
+                        .larch_got_pcala64_hi12,
 
                         .sparc_olo10,
                         .sparc_hix22,
                         .sparc_wdisp10,
                         .sparc_wdisp16,
+                        .sparc_got_op_lox10,
+                        .sparc_got_op_hix22,
                         => false,
                     },
                 },
@@ -1954,7 +2131,7 @@ const SymbolReloc = struct {
 
     fn apply(reloc: *SymbolReloc, elf: *Elf) void {
         const node = reloc.node.unwrap() orelse return; // deleted
-        if (node.hasMoved(&elf.mf) or reloc.target.hasMoved(elf)) {
+        if (node.hasMoved(&elf.mf) or reloc.target_symbol.hasMoved(elf)) {
             // There's no point applying the relocation now, because it will be re-applied by
             // `flushMoved` at some point anyway.
             return;
@@ -1966,7 +2143,7 @@ const SymbolReloc = struct {
             reloc.relaSection(elf).relaSetOffset(elf, rela_index, reloc_addr);
             return;
         }
-        switch (reloc.result) {
+        switch (reloc.bits.result) {
             .ok => {},
             .overflowed => elf.overflowed_reloc_count -= 1,
             .misaligned => elf.misaligned_reloc_count -= 1,
@@ -1977,14 +2154,14 @@ const SymbolReloc = struct {
         }
         if (reloc.applyInner(elf)) {
             @branchHint(.likely);
-            reloc.result = .ok;
+            reloc.bits.result = .ok;
         } else |err| switch (err) {
             error.RelocationOverflow => {
-                reloc.result = .overflowed;
+                reloc.bits.result = .overflowed;
                 elf.overflowed_reloc_count += 1;
             },
             error.RelocationMisaligned => {
-                reloc.result = .misaligned;
+                reloc.bits.result = .misaligned;
                 elf.misaligned_reloc_count += 1;
             },
         }
@@ -1995,21 +2172,21 @@ const SymbolReloc = struct {
         const dest_slice = node.slice(&elf.mf)[@intCast(reloc.offset)..];
 
         const addend: u64 = @bitCast(reloc.addend);
-        const target_val: u64 = type: switch (reloc.type.target) {
-            .abs => reloc.target.value(elf) +% addend,
-            .rel => reloc.target.value(elf) +% addend -% dest_vaddr,
+        const target_val: u64 = type: switch (reloc.bits.type.target) {
+            .abs => reloc.target_symbol.value(elf) +% addend,
+            .rel => reloc.target_symbol.value(elf) +% addend -% dest_vaddr,
             .pltabs => {
-                const plt_entry_addr = elf.pltEntryTargetAddr(reloc.target) orelse continue :type .abs;
+                const plt_entry_addr = elf.pltEntryTargetAddr(reloc.target_symbol) orelse continue :type .abs;
                 break :type plt_entry_addr +% addend;
             },
             .pltrel => {
-                const plt_entry_addr = elf.pltEntryTargetAddr(reloc.target) orelse continue :type .rel;
+                const plt_entry_addr = elf.pltEntryTargetAddr(reloc.target_symbol) orelse continue :type .rel;
                 break :type plt_entry_addr +% addend -% dest_vaddr;
             },
-            .dtpoff => reloc.target.value(elf) +% addend,
+            .dtpoff => reloc.target_symbol.value(elf) +% addend,
             .tpoff => switch (elf.targetTlsVariant()) {
-                .I_original => |tls| tls.tcb_size +% reloc.target.value(elf) +% addend,
-                .I_modified => |tls| 0 -% tls.tp_off +% reloc.target.value(elf) +% addend,
+                .I_original => |tls| tls.tcb_size +% reloc.target_symbol.value(elf) +% addend,
+                .I_modified => |tls| 0 -% tls.tp_off +% reloc.target_symbol.value(elf) +% addend,
                 .II => {
                     const tls_phndx = elf.getNode(elf.ni.tls.unwrap().?).segment;
                     const tls_size: u64 = switch (elf.phdrSlice()) {
@@ -2018,13 +2195,57 @@ const SymbolReloc = struct {
                             break :tls_size elf.targetLoad(&phdr[tls_phndx].memsz);
                         },
                     };
-                    break :type reloc.target.value(elf) +% addend -% tls_size;
+                    break :type reloc.target_symbol.value(elf) +% addend -% tls_size;
                 },
             },
-            .size => reloc.target.size(elf),
-            .special => return reloc.type.action.special.applyInner(
+            .size => reloc.target_symbol.size(elf),
+
+            .gotabs_symbol => {
+                const got_vaddr = elf.shndx.got.vaddr(elf);
+                const got_offset = elf.got.getIndex(.{ .symbol = reloc.target_symbol }).? * elf.targetPtrSize();
+                break :type (got_vaddr + got_offset) +% addend;
+            },
+            .gotrel_symbol => {
+                const got_vaddr = elf.shndx.got.vaddr(elf);
+                const got_offset = elf.got.getIndex(.{ .symbol = reloc.target_symbol }).? * elf.targetPtrSize();
+                break :type (got_vaddr + got_offset) +% addend -% dest_vaddr;
+            },
+            .gotoff_symbol => {
+                const got_offset = elf.got.getIndex(.{ .symbol = reloc.target_symbol }).? * elf.targetPtrSize();
+                break :type got_offset +% addend;
+            },
+            .gotabs_tpoff => {
+                const got_vaddr = elf.shndx.got.vaddr(elf);
+                const got_offset = elf.got.getIndex(.{ .tpoff = reloc.target_symbol }).? * elf.targetPtrSize();
+                break :type (got_vaddr + got_offset) +% addend;
+            },
+            .gotrel_tpoff => {
+                const got_vaddr = elf.shndx.got.vaddr(elf);
+                const got_offset = elf.got.getIndex(.{ .tpoff = reloc.target_symbol }).? * elf.targetPtrSize();
+                break :type (got_vaddr + got_offset) +% addend -% dest_vaddr;
+            },
+            .gotoff_tpoff => {
+                const got_offset = elf.got.getIndex(.{ .tpoff = reloc.target_symbol }).? * elf.targetPtrSize();
+                break :type got_offset +% addend;
+            },
+            .gotabs_tlsgd => {
+                const got_vaddr = elf.shndx.got.vaddr(elf);
+                const got_offset = elf.got.getIndex(.{ .tlsgd0 = reloc.target_symbol }).? * elf.targetPtrSize();
+                break :type (got_vaddr + got_offset) +% addend;
+            },
+            .gotrel_tlsgd => {
+                const got_vaddr = elf.shndx.got.vaddr(elf);
+                const got_offset = elf.got.getIndex(.{ .tlsgd0 = reloc.target_symbol }).? * elf.targetPtrSize();
+                break :type (got_vaddr + got_offset) +% addend -% dest_vaddr;
+            },
+            .gotoff_tlsgd => {
+                const got_offset = elf.got.getIndex(.{ .tlsgd0 = reloc.target_symbol }).? * elf.targetPtrSize();
+                break :type got_offset +% addend;
+            },
+
+            .special => return reloc.bits.type.action.special.applyInner(
                 elf,
-                reloc.target,
+                reloc.target_symbol,
                 reloc.addend,
                 dest_vaddr,
                 dest_slice,
@@ -2033,7 +2254,7 @@ const SymbolReloc = struct {
 
         // Check for the `R_*_RELATIVE` case now, because it is possible only when no shift or cast
         // is required, meaning we can handle it now and return early.
-        if (reloc.rela_index.unwrap()) |rela_index| switch (elf.classifySymbolValue(reloc.target)) {
+        if (reloc.rela_index.unwrap()) |rela_index| switch (elf.classifySymbolValue(reloc.target_symbol)) {
             .static => unreachable,
             .dynamic => {
                 // The relocation happens at runtime; we just need to update its offset.
@@ -2046,31 +2267,34 @@ const SymbolReloc = struct {
                 // destination slice, we actually want to write it to the runtime relocation entry.
                 switch (elf.identClass()) {
                     .NONE, _ => unreachable,
-                    .@"32" => assert(reloc.type.action.simple.dest == .@"32"),
-                    .@"64" => assert(reloc.type.action.simple.dest == .@"64"),
+                    .@"32" => assert(reloc.bits.type.action.simple.dest == .@"32"),
+                    .@"64" => assert(reloc.bits.type.action.simple.dest == .@"64"),
                 }
-                assert(reloc.type.action.simple.cast == .unsigned);
-                assert(reloc.type.action.simple.shift == .@"0");
+                assert(reloc.bits.type.action.simple.cast == .unsigned);
+                assert(reloc.bits.type.action.simple.shift == .@"0");
                 elf.shndx.rela_dyn.relaSetOffset(elf, rela_index, dest_vaddr);
                 elf.shndx.rela_dyn.relaSetAddend(elf, rela_index, target_val);
                 return;
             },
         };
 
-        try reloc.type.action.simple.write(target_val, dest_slice, elf.targetEndian());
+        try reloc.bits.type.action.simple.write(target_val, dest_slice, elf.targetEndian());
     }
 
     fn delete(reloc: *SymbolReloc, elf: *Elf, index: SymbolReloc.Index) void {
         assert(index.get(elf) == reloc);
 
         reloc.deleteOutputRel(elf);
-        if (reloc.type.dependsOnTlsSize(elf)) {
+        if (reloc.bits.type.dependsOnTlsSize(elf)) {
             assert(elf.tls_size_symbol_relocs.swapRemove(index));
+        }
+        if (reloc.bits.type.dependsOnGotAddress()) {
+            assert(elf.got_relocs.swapRemove(index));
         }
 
         switch (reloc.prev) {
             .none => {
-                const first_target_reloc = &reloc.target.index(elf).ptr(elf).first_target_reloc;
+                const first_target_reloc = &reloc.target_symbol.index(elf).ptr(elf).first_target_reloc;
                 assert(first_target_reloc.* == index);
                 first_target_reloc.* = reloc.next;
             },
@@ -2080,7 +2304,7 @@ const SymbolReloc = struct {
             .none => {},
             else => |next| next.get(elf).prev = reloc.prev,
         }
-        switch (reloc.result) {
+        switch (reloc.bits.result) {
             .ok => {},
             .overflowed => elf.overflowed_reloc_count -= 1,
             .misaligned => elf.misaligned_reloc_count -= 1,
@@ -2113,25 +2337,25 @@ const SymbolReloc = struct {
         const reloc_node = reloc.node.unwrap().?; // deleted
 
         // Delete any current output relocation or error.
-        switch (reloc.result) {
+        switch (reloc.bits.result) {
             .ok, .overflowed, .misaligned => {
                 reloc.deleteOutputRel(elf);
             },
             .illegal_dynamic_type => {
                 elf.illegal_dynamic_type_reloc_count -= 1;
-                reloc.result = .ok;
+                reloc.bits.result = .ok;
             },
             .illegal_dynamic_section => {
                 elf.illegal_dynamic_section_reloc_count -= 1;
-                reloc.result = .ok;
+                reloc.bits.result = .ok;
             },
         }
 
         assert(reloc.rela_index == .none);
 
-        const symbol_class = elf.classifySymbolValue(reloc.target);
+        const symbol_class = elf.classifySymbolValue(reloc.target_symbol);
 
-        switch (reloc.target.unwrap()) {
+        switch (reloc.target_symbol.unwrap()) {
             .local => {},
             .global => |gsi| switch (symbol_class) {
                 .static => gsi.ptr(elf).status.any_static_target_relocs = true,
@@ -2152,25 +2376,36 @@ const SymbolReloc = struct {
         } = switch (symbol_class) {
             .static => return,
 
-            .static_relative => switch (reloc.type.target) {
+            .static_relative => switch (reloc.bits.type.target) {
                 // We need a runtime relocation if the relocation depends on our load address, which
                 // is the case iff the relocation resolves to the absolute value of a symbol. Relocs
                 // which are PC-relative, or which resolve to something other than a symbol address
                 // (e.g. a symbol's size), are fine.
 
                 .pltrel,
+                .gotrel_symbol,
+                .gotoff_symbol,
+                .gotrel_tpoff,
+                .gotoff_tpoff,
+                .gotrel_tlsgd,
+                .gotoff_tlsgd,
                 .rel,
                 .size,
                 .dtpoff,
                 .tpoff,
                 => return,
 
-                .abs, .pltabs => switch (reloc.type.action.simple.dest.isAddr(elf)) {
+                .abs,
+                .pltabs,
+                .gotabs_symbol,
+                .gotabs_tpoff,
+                .gotabs_tlsgd,
+                => switch (reloc.bits.type.action.simple.dest.isAddr(elf)) {
                     true => .relative,
                     false => .illegal,
                 },
 
-                .special => switch (reloc.type.action.special) {
+                .special => switch (reloc.bits.type.action.special) {
                     .larch_pcala_hi20,
                     .larch_pcala64_lo20,
                     .larch_pcala64_hi12,
@@ -2180,6 +2415,11 @@ const SymbolReloc = struct {
                     .sparc_wdisp10,
                     .sparc_wdisp16,
                     .sparc_le_hix22,
+                    .larch_got_pcala_hi20,
+                    .larch_got_pcala64_lo20,
+                    .larch_got_pcala64_hi12,
+                    .sparc_got_op_lox10,
+                    .sparc_got_op_hix22,
                     => return,
 
                     .sparc_olo10,
@@ -2188,44 +2428,60 @@ const SymbolReloc = struct {
                 },
             },
 
-            .dynamic => switch (reloc.type.target) {
-                // PLT relocations targeting dynamic symbols actually target that symbol's PLT
-                // entry, so we should emit an `R_*_RELATIVE` relocation instead.
-                .pltabs => switch (reloc.type.action.simple.dest.isAddr(elf)) {
+            .dynamic => switch (reloc.bits.type.target) {
+                // PLT/GOT relocations targeting dynamic symbols actually target that symbol's PLT
+                // or GOT entry, so we should emit an `R_*_RELATIVE` relocation instead.
+                .pltabs,
+                .gotabs_symbol,
+                .gotabs_tpoff,
+                .gotabs_tlsgd,
+                => switch (reloc.bits.type.action.simple.dest.isAddr(elf)) {
                     true => .relative,
                     false => .illegal,
                 },
-                // ...although PC-relative PLT relocations don't even need that that!
-                .pltrel => return,
+                // ...although PC-relative PLT/GOT relocations don't even need that that!
+                .pltrel,
+                .gotrel_symbol,
+                .gotoff_symbol,
+                .gotrel_tpoff,
+                .gotoff_tpoff,
+                .gotrel_tlsgd,
+                .gotoff_tlsgd,
+                => return,
                 // PC-relative relocations are not valid dynamic relocations.
                 .rel => .illegal,
                 // On the few targets supporting size relocations, they are valid at runtime.
-                .size => switch (reloc.type.action.simple.dest) {
+                .size => switch (reloc.bits.type.action.simple.dest) {
                     .@"32" => .size32,
                     .@"64" => .size64,
                     else => .illegal,
                 },
                 // Absolute addresses and TLS offsets can be lowered at runtime provided they
                 // are address-sized.
-                .dtpoff => switch (reloc.type.action.simple.dest.isAddr(elf)) {
+                .dtpoff => switch (reloc.bits.type.action.simple.dest.isAddr(elf)) {
                     true => .dtp_off,
                     false => .illegal,
                 },
-                .tpoff => switch (reloc.type.action.simple.dest.isAddr(elf)) {
+                .tpoff => switch (reloc.bits.type.action.simple.dest.isAddr(elf)) {
                     true => .tp_off,
                     false => .illegal,
                 },
-                .abs => switch (reloc.type.action.simple.dest.isAddr(elf)) {
+                .abs => switch (reloc.bits.type.action.simple.dest.isAddr(elf)) {
                     true => .abs_addr,
                     false => .illegal,
                 },
 
-                .special => switch (reloc.type.action.special) {
+                .special => switch (reloc.bits.type.action.special) {
                     .larch_b21,
                     .larch_b26,
                     .larch_call36,
                     .sparc_wdisp10,
                     .sparc_wdisp16,
+                    .larch_got_pcala_hi20,
+                    .larch_got_pcala64_lo20,
+                    .larch_got_pcala64_hi12,
+                    .sparc_got_op_lox10,
+                    .sparc_got_op_hix22,
                     => return,
 
                     .larch_pcala_hi20,
@@ -2255,7 +2511,7 @@ const SymbolReloc = struct {
                     .abs_addr,
                     .dtp_off,
                     .tp_off,
-                    => switch (reloc.target.unwrap()) {
+                    => switch (reloc.target_symbol.unwrap()) {
                         .local => true,
                         .global => |gsi| gsi.resolveAlias(elf).defined(elf),
                     },
@@ -2267,7 +2523,7 @@ const SymbolReloc = struct {
                 };
                 if (!allow) {
                     // ...but in this case we actually do need to trigger an error.
-                    reloc.result = .illegal_dynamic_section;
+                    reloc.bits.result = .illegal_dynamic_section;
                     elf.illegal_dynamic_section_reloc_count += 1;
                 }
                 return;
@@ -2278,7 +2534,7 @@ const SymbolReloc = struct {
 
         const rel_type: MachineRelocType = rel: switch (want_dynamic_reloc) {
             .illegal => {
-                reloc.result = .illegal_dynamic_type;
+                reloc.bits.result = .illegal_dynamic_type;
                 elf.illegal_dynamic_type_reloc_count += 1;
                 return;
             },
@@ -2292,7 +2548,7 @@ const SymbolReloc = struct {
         const target_dynsym: u32 = switch (want_dynamic_reloc) {
             .illegal => unreachable, // handled above
             .relative => 0,
-            else => reloc.target.unwrap().global.dynsymIndex(elf).?,
+            else => reloc.target_symbol.unwrap().global.dynsymIndex(elf).?,
         };
 
         try elf.shndx.rela_dyn.relaEnsureAdditionalCapacity(elf, 1);
@@ -2435,225 +2691,18 @@ const GotKey = union(enum) {
     /// Value is the signed offset of the given symbol from the TLS pointer.
     tpoff: Symbol.Id,
 
-    /// Value is the TLS module ID of the DSO we are creating.
+    /// Value is the TLS module ID for the given STT_TLS symbol. Alternatively, it may be set to
+    /// `Symbol.Id.null` to resolve to the TLS module ID of this module (for TLSLD relocations).
     ///
-    /// Used for the first of the two GOT entries generated by a TLSLD relocation.
-    tlsld0,
-    /// Value is always 0.
-    ///
-    /// Used for the second of the two GOT entries generated by a TLSLD relocation.
-    tlsld1,
-
-    /// Value is the TLS module ID for the given STT_TLS symbol.
+    /// Alternative
     ///
     /// Used for the first of the two GOT entries generated by a TLSGD relocation.
     tlsgd0: Symbol.Id,
     /// Value is the offset of the given STT_TLS symbol from the base of the per-module TLS area.
+    /// Alternatively, it may be set to `Symbol.Id.null` to resolve to 0 (for TLSLD relocations).
     ///
     /// Used for the second of the two GOT entries generated by a TLSGD relocation.
     tlsgd1: Symbol.Id,
-};
-
-/// A relocation targeting a particular GOT entry.
-const GotReloc = struct {
-    /// The node containing this relocation. Possible values are:
-    /// * An input section
-    /// * A section
-    /// * A NAV, UAV, or lazy code/data
-    /// * `.none`, if this relocation was deleted (in which case it should be ignored)
-    node: MappedFile.Node.Index.Optional,
-    /// The offset of the relocation inside of `node`.
-    offset: u64,
-    target: GotKey,
-    addend: i64,
-    type: GotReloc.Type,
-    result: enum(u8) { ok, overflowed, misaligned },
-
-    /// `GotReloc.Type` has the same structure as `SymbolReloc.Type`, just with different `Target`
-    /// and `Special` enums---consult doc comments on `SymbolReloc.Type` for an overview.
-    const Type = packed struct(u16) {
-        fn simple(target: Target, action: Simple) GotReloc.Type {
-            assert(target != .special);
-            return .{ .target = target, .action = .{ .simple = action } };
-        }
-
-        fn special(s: Special) GotReloc.Type {
-            return .{ .target = .special, .action = .{ .special = s } };
-        }
-
-        target: Target,
-        action: packed union {
-            simple: Simple,
-            special: Special,
-        },
-
-        /// Like `SymbolReloc.Target`, but for GOT relocations. There are fewer tags because there
-        /// are fewer different kinds of GOT relocation.
-        const Target = enum(u3) {
-            /// This is a "special" relocation whose specific type is in the `action.special` field.
-            special,
-
-            /// Absolute address of the GOT entry.
-            abs,
-            /// Offset from the relocation itself to the GOT entry ("PC-relative").
-            rel,
-            /// Offset from the base of the GOT to the GOT entry.
-            offset,
-        };
-
-        const Simple = SymbolReloc.Type.Simple;
-
-        /// Like `SymbolReloc.Special`, but for GOT relocations.
-        const Special = enum(u13) {
-            larch_pcala_hi20,
-            larch_pcala64_lo20,
-            larch_pcala64_hi12,
-
-            sparc_op_lox10,
-            sparc_op_hix22,
-
-            fn applyInner(
-                s: Special,
-                elf: *Elf,
-                got_vaddr: u64,
-                got_offset: u64,
-                addend: u64,
-                dest_vaddr: u64,
-                dest_slice: []u8,
-            ) error{ RelocationMisaligned, RelocationOverflow }!void {
-                switch (s) {
-                    .larch_pcala_hi20 => {
-                        const val = got_vaddr +% got_offset +% addend;
-                        const inst: *align(1) link.loongarch.J20 = @ptrCast(dest_slice[0..4]);
-                        elf.targetStore(inst, .{
-                            .b0_4 = elf.targetLoad(inst).b0_4,
-                            .j20 = link.loongarch.pcalaHi20(val, dest_vaddr),
-                            .b25_31 = elf.targetLoad(inst).b25_31,
-                        });
-                    },
-                    .larch_pcala64_lo20 => {
-                        const val = got_vaddr +% got_offset +% addend;
-                        const inst: *align(1) link.loongarch.J20 = @ptrCast(dest_slice[0..4]);
-                        elf.targetStore(inst, .{
-                            .b0_4 = elf.targetLoad(inst).b0_4,
-                            .j20 = link.loongarch.pcala64Lo20(val, dest_vaddr),
-                            .b25_31 = elf.targetLoad(inst).b25_31,
-                        });
-                    },
-                    .larch_pcala64_hi12 => {
-                        const val = got_vaddr +% got_offset +% addend;
-                        const inst: *align(1) link.loongarch.K12 = @ptrCast(dest_slice[0..4]);
-                        elf.targetStore(inst, .{
-                            .b0_9 = elf.targetLoad(inst).b0_9,
-                            .k12 = link.loongarch.pcala64Hi12(val, dest_vaddr),
-                            .b22_31 = elf.targetLoad(inst).b22_31,
-                        });
-                    },
-                    .sparc_op_lox10 => {
-                        const dest_ptr: *align(1) packed struct(u32) {
-                            imm13: u13,
-                            b13_31: u19,
-                        } = @ptrCast(dest_slice);
-                        elf.targetStore(dest_ptr, .{
-                            .imm13 = @as(u10, @truncate(got_offset)),
-                            .b13_31 = elf.targetLoad(dest_ptr).b13_31,
-                        });
-                    },
-                    .sparc_op_hix22 => {
-                        const dest_ptr: *align(1) packed struct(u32) {
-                            imm22: u22,
-                            b22_31: u10,
-                        } = @ptrCast(dest_slice);
-                        elf.targetStore(dest_ptr, .{
-                            .imm22 = @truncate(got_offset >> 10),
-                            .b22_31 = elf.targetLoad(dest_ptr).b22_31,
-                        });
-                    },
-                }
-            }
-        };
-    };
-
-    const Index = enum(u32) {
-        none = std.math.maxInt(u32),
-        _,
-
-        fn get(index: GotReloc.Index, elf: *Elf) *GotReloc {
-            return &elf.got_relocs.items[@backingInt(index)];
-        }
-    };
-
-    fn apply(reloc: *GotReloc, elf: *Elf) void {
-        assert(elf.ehdrType() != .REL);
-        const node = reloc.node.unwrap() orelse return; // deleted
-        if (node.hasMoved(&elf.mf) or elf.shndx.got.node(elf).hasMoved(&elf.mf)) {
-            // There's no point applying the relocation now, because it will be re-applied by
-            // `flushMoved` at some point anyway.
-            return;
-        }
-        switch (reloc.result) {
-            .ok => {},
-            .overflowed => elf.overflowed_reloc_count -= 1,
-            .misaligned => elf.misaligned_reloc_count -= 1,
-        }
-        if (reloc.applyInner(elf)) {
-            @branchHint(.likely);
-            reloc.result = .ok;
-        } else |err| switch (err) {
-            error.RelocationOverflow => {
-                reloc.result = .overflowed;
-                elf.overflowed_reloc_count += 1;
-            },
-            error.RelocationMisaligned => {
-                reloc.result = .misaligned;
-                elf.misaligned_reloc_count += 1;
-            },
-        }
-    }
-    fn applyInner(reloc: *const GotReloc, elf: *Elf) error{ RelocationOverflow, RelocationMisaligned }!void {
-        const node = reloc.node.unwrap().?;
-        const dest_vaddr = elf.getNodeVAddr(node) + reloc.offset;
-        const dest_slice = node.slice(&elf.mf)[@intCast(reloc.offset)..];
-
-        const got_vaddr = elf.shndx.got.vaddr(elf);
-        const got_index: u64 = elf.got.getIndex(reloc.target).?;
-        const got_offset: u64 = switch (elf.identClass()) {
-            .NONE, _ => unreachable,
-            inline else => |class| @sizeOf(class.ElfN().Addr) * got_index,
-        };
-        const addend: u64 = @bitCast(reloc.addend);
-
-        const target_val: u64 = switch (reloc.type.target) {
-            .abs => got_vaddr +% got_offset +% addend,
-            .rel => got_vaddr +% got_offset +% addend -% dest_vaddr,
-            .offset => got_offset +% addend,
-            .special => return reloc.type.action.special.applyInner(
-                elf,
-                got_vaddr,
-                got_offset,
-                addend,
-                dest_vaddr,
-                dest_slice,
-            ),
-        };
-        try reloc.type.action.simple.write(target_val, dest_slice, elf.targetEndian());
-    }
-
-    fn delete(reloc: *GotReloc, elf: *Elf) void {
-        switch (reloc.result) {
-            .ok => {},
-            .overflowed => elf.overflowed_reloc_count -= 1,
-            .misaligned => elf.misaligned_reloc_count -= 1,
-        }
-        reloc.* = .{
-            .node = .none,
-            .offset = undefined,
-            .target = undefined,
-            .addend = undefined,
-            .type = undefined,
-            .result = undefined,
-        };
-    }
 };
 
 /// Records all global symbols defined in any DSO we depend on. For each symbol, its name, version,
@@ -2999,6 +3048,8 @@ const AddLocalSymbolOptions = struct {
 };
 fn addLocalSymbol(elf: *Elf, opts: AddLocalSymbolOptions) Error!Symbol.LocalIndex {
     const gpa = elf.base.comp.gpa;
+
+    assert(opts.shndx != .UNDEF);
 
     try elf.symtab.ensureUnusedCapacity(gpa, 1);
     try elf.changed_symtab_index.ensureUnusedCapacity(gpa, 1);
@@ -4293,7 +4344,7 @@ const Symbol = struct {
                 var ri = sym_id.index(elf).ptr(elf).first_target_reloc;
                 while (ri != .none) {
                     const reloc = ri.get(elf);
-                    assert(reloc.target == sym_id);
+                    assert(reloc.target_symbol == sym_id);
                     try reloc.updateDynamicReloc(elf);
                     ri = reloc.next;
                 }
@@ -4470,7 +4521,7 @@ const Symbol = struct {
             var ri = sym_id.index(elf).ptr(elf).first_target_reloc;
             while (ri != .none) {
                 const reloc = ri.get(elf);
-                assert(reloc.target == sym_id);
+                assert(reloc.target_symbol == sym_id);
                 reloc.apply(elf);
                 ri = reloc.next;
             }
@@ -4563,7 +4614,7 @@ fn classifySymbolValue(elf: *Elf, sym: Symbol.Id) enum {
 
     const shndx: Section.Index = switch (resolved_sym.unwrap()) {
         .local => shndx: {
-            assert(symtab_shndx != .UNDEF);
+            assert(sym == Symbol.Id.null or symtab_shndx != .UNDEF);
             assert(visibility == .DEFAULT);
             break :shndx symtab_shndx;
         },
@@ -4683,7 +4734,6 @@ fn lazySymbolInner(elf: *Elf, lazy: link.File.LazySymbol) Error!link.File.Symbol
                 .shndx = shndx,
             }),
             .first_symbol_reloc = .none,
-            .first_got_reloc = .none,
         };
         elf.base.comp.link_prog_node.increaseEstimatedTotalItems(1);
     }
@@ -6787,7 +6837,6 @@ pub fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
         skip_symbol_relocs: MappedFile.Node.Index.Optional = .none,
         first_node_reloc: ?*NodeReloc.Index = null,
         skip_node_relocs: MappedFile.Node.Index.Optional = .none,
-        first_got_reloc: ?*GotReloc.Index = null,
     } = switch (elf.getNode(ni)) {
         .deleted,
         .archive,
@@ -6814,18 +6863,15 @@ pub fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
         => unreachable, // cannot contain relocs (.plt, .dynamic, and .eh_frame_hdr unsupported)
         .input_section => |isi| .{
             .first_symbol_reloc = &elf.input_sections.items[@backingInt(isi)].first_symbol_reloc,
-            .first_got_reloc = &elf.input_sections.items[@backingInt(isi)].first_got_reloc,
         },
         .nav => |nmi| .{
             .first_symbol_reloc = &elf.navs.values()[@backingInt(nmi)].first_symbol_reloc,
-            .first_got_reloc = &elf.navs.values()[@backingInt(nmi)].first_got_reloc,
         },
         .uav => |umi| .{
             .first_symbol_reloc = &elf.uavs.values()[@backingInt(umi)].first_symbol_reloc,
         },
         inline .lazy_code, .lazy_const_data => |lmi| .{
             .first_symbol_reloc = &elf.lazy.getPtr(lmi.ref().kind).map.values()[lmi.ref().index].first_symbol_reloc,
-            .first_got_reloc = &elf.lazy.getPtr(lmi.ref().kind).map.values()[lmi.ref().index].first_got_reloc,
         },
         .unit_debug_info_header => |ui| .{
             .first_node_reloc = &elf.dwarf_units[@backingInt(ui)].debug_info_header_first_node_reloc,
@@ -6893,19 +6939,6 @@ pub fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
         }
         ptr.* = @fromBackingInt(@intCast(elf.node_relocs.items.len));
     }
-
-    if (opts.first_got_reloc) |ptr| {
-        if (ptr.* != .none) {
-            for (elf.got_relocs.items[@backingInt(ptr.*)..]) |*reloc| {
-                if (reloc.node != ni.toOptional()) {
-                    if (reloc.node == .none) continue;
-                    break;
-                }
-                reloc.delete(elf);
-            }
-        }
-        ptr.* = @fromBackingInt(@intCast(elf.got_relocs.items.len));
-    }
 }
 
 /// Given that `node` has moved, updates all relocations in `node` as needed. In relocatables, this
@@ -6918,7 +6951,6 @@ fn flushMovedNodeRelocs(
         skip_symbol_relocs: MappedFile.Node.Index.Optional = .none,
         first_node_reloc: NodeReloc.Index = .none,
         skip_node_relocs: MappedFile.Node.Index.Optional = .none,
-        first_got_reloc: GotReloc.Index = .none,
     },
 ) void {
     if (opts.first_symbol_reloc != .none) {
@@ -6937,16 +6969,6 @@ fn flushMovedNodeRelocs(
             if (reloc.node != node.toOptional()) {
                 if (reloc.node == .none) continue;
                 if (reloc.node == opts.skip_node_relocs) continue;
-                break;
-            }
-            reloc.apply(elf);
-        }
-    }
-
-    if (opts.first_got_reloc != .none) {
-        for (elf.got_relocs.items[@backingInt(opts.first_got_reloc)..]) |*reloc| {
-            if (reloc.node != node.toOptional()) {
-                if (reloc.node == .none) continue;
                 break;
             }
             reloc.apply(elf);
@@ -7496,7 +7518,6 @@ fn navMapIndex(elf: *Elf, zcu: *Zcu, nav_index: InternPool.Nav.Index) Error!Node
                 .shndx = shndx,
             }),
             .first_symbol_reloc = .none,
-            .first_got_reloc = .none,
         };
     }
     return nmi;
@@ -8064,7 +8085,6 @@ fn loadObject(
                     .vaddr = 0,
                     .node = ni,
                     .first_symbol_reloc = .none,
-                    .first_got_reloc = .none,
                 };
                 elf.input_prog_node.increaseEstimatedTotalItems(1);
             }
@@ -9422,7 +9442,6 @@ fn ensureUnusedRelocCapacity(elf: *Elf, node: MappedFile.Node.Index, len: usize)
     const gpa = elf.base.comp.gpa;
     try elf.symbol_relocs.ensureUnusedCapacity(gpa, len);
     try elf.node_relocs.ensureUnusedCapacity(gpa, len);
-    try elf.got_relocs.ensureUnusedCapacity(gpa, len);
     const class = elf.identClass();
     switch (elf.ehdrType()) {
         .REL => {
@@ -9460,7 +9479,6 @@ fn ensureUnusedRelocCapacity(elf: *Elf, node: MappedFile.Node.Index, len: usize)
             try shndx.get(elf).rela.shndx.relaEnsureAdditionalCapacity(elf, len);
         },
         .EXEC, .DYN => {
-            try elf.tls_size_symbol_relocs.ensureUnusedCapacity(gpa, len);
             const new_got_entries = len * 2; // at worst, every reloc is a new TLSGD
             try elf.got.ensureUnusedCapacity(gpa, new_got_entries);
             const need_got_size = switch (class) {
@@ -9506,13 +9524,12 @@ fn addRelocAssumeCapacity(
             elf.symbol_relocs.appendAssumeCapacity(.{
                 .node = node.toOptional(),
                 .offset = offset,
-                .type = undefined,
-                .target = target,
+                .bits = undefined,
+                .target_symbol = target,
                 .addend = .{ .normal = addend },
                 .next = next,
                 .prev = .none,
                 .rela_index = rela_index.toOptional(),
-                .result = .ok,
             });
             ri.get(elf).apply(elf);
         },
@@ -9567,14 +9584,14 @@ fn addRelocAssumeCapacity(
                 .TLS_LE64_LO20 => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.tpoff, .{ .dest = .@"32[24:5]",  .cast = .trunc,    .shift = .@"32" })),
                 .TLS_LE64_HI12 => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.tpoff, .{ .dest = .@"32[21:10]", .cast = .unsigned, .shift = .@"52" })),
 
-                .GOT_PC_LO12   => elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .simple(.abs, .{ .dest = .@"32[21:10]", .cast = .trunc, .shift = .@"0" })),
-                .GOT_PC_HI20   => elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .special(.larch_pcala_hi20)),
-                .GOT64_PC_LO20 => elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .special(.larch_pcala64_lo20)),
-                .GOT64_PC_HI12 => elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .special(.larch_pcala64_hi12)),
-                .GOT_LO12      => elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .simple(.abs, .{ .dest = .@"32[21:10]", .cast = .trunc,    .shift = .@"0" })),
-                .GOT_HI20      => elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .simple(.abs, .{ .dest = .@"32[24:5]",  .cast = .trunc,    .shift = .@"12" })),
-                .GOT64_LO20    => elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .simple(.abs, .{ .dest = .@"32[24:5]",  .cast = .trunc,    .shift = .@"32" })),
-                .GOT64_HI12    => elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .simple(.abs, .{ .dest = .@"32[21:10]", .cast = .unsigned, .shift = .@"52" })),
+                .GOT_PC_LO12   => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotabs_symbol, .{ .dest = .@"32[21:10]", .cast = .trunc, .shift = .@"0" })),
+                .GOT_PC_HI20   => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .special(.larch_got_pcala_hi20)),
+                .GOT64_PC_LO20 => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .special(.larch_got_pcala64_lo20)),
+                .GOT64_PC_HI12 => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .special(.larch_got_pcala64_hi12)),
+                .GOT_LO12      => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotabs_symbol, .{ .dest = .@"32[21:10]", .cast = .trunc,    .shift = .@"0" })),
+                .GOT_HI20      => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotabs_symbol, .{ .dest = .@"32[24:5]",  .cast = .trunc,    .shift = .@"12" })),
+                .GOT64_LO20    => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotabs_symbol, .{ .dest = .@"32[24:5]",  .cast = .trunc,    .shift = .@"32" })),
+                .GOT64_HI12    => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotabs_symbol, .{ .dest = .@"32[21:10]", .cast = .unsigned, .shift = .@"52" })),
                 // zig fmt: on
             },
             .PPC64 => switch (@"type".PPC64) {
@@ -9678,13 +9695,13 @@ fn addRelocAssumeCapacity(
                 .TLS_DTPOFF32  => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.dtpoff, .{ .dest = .@"32", .cast = .unsigned, .shift = .@"0" })),
                 .TLS_DTPOFF64  => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.dtpoff, .{ .dest = .@"64", .cast = .unsigned, .shift = .@"0" })),
 
-                .GOT13            => elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .simple(.offset, .{ .dest = .@"32[12:0]", .cast = .unsigned, .shift = .@"0" })),
-                .GOT22            => elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .simple(.offset, .{ .dest = .@"32[21:0]", .cast = .trunc,    .shift = .@"10" })),
-                .GOTDATA_OP_LOX10 => elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .special(.sparc_op_lox10)),
-                .GOTDATA_OP_HIX22 => elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .special(.sparc_op_hix22)),
-                .TLS_GD_HI22      => elf.addGotRelocAssumeCapacity(node, offset, .{ .tlsgd0 = target }, addend, .simple(.offset, .{ .dest = .@"32[21:0]", .cast = .trunc, .shift = .@"10" })),
-                .TLS_LDM_HI22     => elf.addGotRelocAssumeCapacity(node, offset, .tlsld0,               addend, .simple(.offset, .{ .dest = .@"32[21:0]", .cast = .trunc, .shift = .@"10" })),
-                .TLS_IE_HI22      => elf.addGotRelocAssumeCapacity(node, offset, .{ .tpoff = target },  addend, .simple(.offset, .{ .dest = .@"32[21:0]", .cast = .trunc, .shift = .@"10" })),
+                .GOT13            => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotoff_symbol, .{ .dest = .@"32[12:0]", .cast = .unsigned, .shift = .@"0" })),
+                .GOT22            => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotoff_symbol, .{ .dest = .@"32[21:0]", .cast = .trunc,    .shift = .@"10" })),
+                .GOTDATA_OP_LOX10 => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .special(.sparc_got_op_lox10)),
+                .GOTDATA_OP_HIX22 => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .special(.sparc_got_op_hix22)),
+                .TLS_GD_HI22      => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotoff_tlsgd, .{ .dest = .@"32[21:0]", .cast = .trunc, .shift = .@"10" })),
+                .TLS_LDM_HI22     => try elf.addSymbolRelocAssumeCapacity(node, offset, .null,  addend, .simple(.gotoff_tlsgd, .{ .dest = .@"32[21:0]", .cast = .trunc, .shift = .@"10" })),
+                .TLS_IE_HI22      => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotoff_tpoff, .{ .dest = .@"32[21:0]", .cast = .trunc, .shift = .@"10" })),
                 // zig fmt: on
 
                 .TLS_GD_CALL, .TLS_LDM_CALL => {
@@ -9750,19 +9767,19 @@ fn addRelocAssumeCapacity(
                 },
                 .GOT10 => {
                     try elf.one_shot_fixups.append(elf.base.comp.gpa, .{ .node = node, .offset = offset, .action = .@"32[12:10] = 0b000" });
-                    elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .simple(.offset, .{ .dest = .@"32[9:0]", .cast = .trunc, .shift = .@"0" }));
+                    try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotoff_symbol, .{ .dest = .@"32[9:0]", .cast = .trunc, .shift = .@"0" }));
                 },
                 .TLS_GD_LO10 => {
                     try elf.one_shot_fixups.append(elf.base.comp.gpa, .{ .node = node, .offset = offset, .action = .@"32[12:10] = 0b000" });
-                    elf.addGotRelocAssumeCapacity(node, offset, .{ .tlsgd0 = target }, addend, .simple(.offset, .{ .dest = .@"32[9:0]", .cast = .trunc, .shift = .@"0" }));
+                    try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotoff_tlsgd, .{ .dest = .@"32[9:0]", .cast = .trunc, .shift = .@"0" }));
                 },
                 .TLS_LDM_LO10 => {
                     try elf.one_shot_fixups.append(elf.base.comp.gpa, .{ .node = node, .offset = offset, .action = .@"32[12:10] = 0b000" });
-                    elf.addGotRelocAssumeCapacity(node, offset, .tlsld0, addend, .simple(.offset, .{ .dest = .@"32[9:0]", .cast = .trunc, .shift = .@"0" }));
+                    try elf.addSymbolRelocAssumeCapacity(node, offset, .null, addend, .simple(.gotoff_tlsgd, .{ .dest = .@"32[9:0]", .cast = .trunc, .shift = .@"0" }));
                 },
                 .TLS_IE_LO10 => {
                     try elf.one_shot_fixups.append(elf.base.comp.gpa, .{ .node = node, .offset = offset, .action = .@"32[12:10] = 0b000" });
-                    elf.addGotRelocAssumeCapacity(node, offset, .{ .tpoff = target }, addend, .simple(.offset, .{ .dest = .@"32[9:0]", .cast = .trunc, .shift = .@"0" }));
+                    try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotoff_tpoff, .{ .dest = .@"32[9:0]", .cast = .trunc, .shift = .@"0" }));
                 },
             },
             .X86_64 => rel_type: switch (@"type".X86_64) {
@@ -9790,12 +9807,7 @@ fn addRelocAssumeCapacity(
                 .GOTOFF64 => return error.UnimplementedRelocation, // offset of symbol from GOT base
                 .PLTOFF64 => return error.UnimplementedRelocation, // offset of PLT entry from GOT base (yes, I know, the name is stupid)
 
-                // TODO: figure out how to do relaxations. Perhaps we want to remove a `GotReloc`
-                // and replace it with a `SymbolReloc` when a relaxation becomes possible, but we'd
-                // need to bear in mind whether incremental updates might make a relaxation
-                // impossible again or something like that. Relaxations seem kind of hostile to
-                // incremental compilation, so perhaps we just only support them in non-incremental
-                // compilations and just apply them in flush or something.
+                // TODO: figure out how to do relaxations
 
                 // Relaxable versions of other relocations. Since we don't yet implement relaxation,
                 // just use the handling for the non-relaxable versions.
@@ -9831,13 +9843,13 @@ fn addRelocAssumeCapacity(
                 .TPOFF32  => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.tpoff,  .{ .dest = .@"32", .cast = .signed,   .shift = .@"0" })),
                 .TPOFF64  => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.tpoff,  .{ .dest = .@"64", .cast = .signed,   .shift = .@"0" })),
 
-                .GOT32      => elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .simple(.offset, .{ .dest = .@"32", .cast = .unsigned, .shift = .@"0" })),
-                .GOT64      => elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .simple(.offset, .{ .dest = .@"64", .cast = .unsigned, .shift = .@"0" })),
-                .GOTPCREL   => elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .simple(.rel,    .{ .dest = .@"32", .cast = .signed,   .shift = .@"0" })),
-                .GOTPCREL64 => elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .simple(.rel,    .{ .dest = .@"64", .cast = .signed,   .shift = .@"0" })),
-                .TLSGD      => elf.addGotRelocAssumeCapacity(node, offset, .{ .tlsgd0 = target }, addend, .simple(.rel,    .{ .dest = .@"32", .cast = .signed,   .shift = .@"0" })),
-                .TLSLD      => elf.addGotRelocAssumeCapacity(node, offset, .tlsld0,               addend, .simple(.rel,    .{ .dest = .@"32", .cast = .signed,   .shift = .@"0" })),
-                .GOTTPOFF   => elf.addGotRelocAssumeCapacity(node, offset, .{ .tpoff = target },  addend, .simple(.rel,    .{ .dest = .@"32", .cast = .signed,   .shift = .@"0" })),
+                .GOT32      => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotoff_symbol, .{ .dest = .@"32", .cast = .unsigned, .shift = .@"0" })),
+                .GOT64      => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotoff_symbol, .{ .dest = .@"64", .cast = .unsigned, .shift = .@"0" })),
+                .GOTPCREL   => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotrel_symbol, .{ .dest = .@"32", .cast = .signed,   .shift = .@"0" })),
+                .GOTPCREL64 => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotrel_symbol, .{ .dest = .@"64", .cast = .signed,   .shift = .@"0" })),
+                .TLSGD      => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotrel_tlsgd,  .{ .dest = .@"32", .cast = .signed,   .shift = .@"0" })),
+                .TLSLD      => try elf.addSymbolRelocAssumeCapacity(node, offset, .null,  addend, .simple(.gotrel_tlsgd,  .{ .dest = .@"32", .cast = .signed,   .shift = .@"0" })),
+                .GOTTPOFF   => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.gotrel_tpoff,  .{ .dest = .@"32", .cast = .signed,   .shift = .@"0" })),
                 // zig fmt: on
 
                 .GOTPC64 => {
@@ -9872,6 +9884,8 @@ fn addSymbolRelocAssumeCapacityInner(
 ) Error!void {
     assert(elf.ehdrType() != .REL);
 
+    const gpa = elf.base.comp.gpa;
+
     request_static_target: {
         if (elf.shndx.dynamic == .UNDEF) break :request_static_target;
         const gsi: Symbol.Global.Index = switch (target.unwrap()) {
@@ -9894,6 +9908,15 @@ fn addSymbolRelocAssumeCapacityInner(
             .dtpoff,
             .tpoff,
             .size,
+            .gotabs_symbol,
+            .gotrel_symbol,
+            .gotoff_symbol,
+            .gotabs_tpoff,
+            .gotrel_tpoff,
+            .gotoff_tpoff,
+            .gotabs_tlsgd,
+            .gotrel_tlsgd,
+            .gotoff_tlsgd,
             => false,
 
             .special => switch (@"type".action.special) {
@@ -9908,10 +9931,15 @@ fn addSymbolRelocAssumeCapacityInner(
                 .larch_b21,
                 .larch_b26,
                 .larch_call36,
+                .larch_got_pcala_hi20,
+                .larch_got_pcala64_lo20,
+                .larch_got_pcala64_hi12,
 
                 .sparc_le_hix22,
                 .sparc_wdisp10,
                 .sparc_wdisp16,
+                .sparc_got_op_lox10,
+                .sparc_got_op_hix22,
                 => false,
             },
         };
@@ -9923,6 +9951,42 @@ fn addSymbolRelocAssumeCapacityInner(
         }
     }
 
+    if (@"type".needsGotEntry()) |got_kind| {
+        const new_index: usize, const new_len: u32 = switch (got_kind) {
+            .symbol => new: {
+                const gop = try elf.got.getOrPut(gpa, .{ .symbol = target });
+                if (gop.found_existing) break :new .{ 0, 0 };
+                gop.value_ptr.* = .none;
+                break :new .{ gop.index, 1 };
+            },
+            .tpoff => new: {
+                const gop = try elf.got.getOrPut(gpa, .{ .tpoff = target });
+                if (gop.found_existing) break :new .{ 0, 0 };
+                gop.value_ptr.* = .none;
+                break :new .{ gop.index, 1 };
+            },
+            .tlsgd => new: {
+                try elf.got.ensureUnusedCapacity(gpa, 2);
+                const gop = elf.got.getOrPutAssumeCapacity(.{ .tlsgd0 = target });
+                if (gop.found_existing) break :new .{ 0, 0 };
+                gop.value_ptr.* = .none;
+                elf.got.putAssumeCapacityNoClobber(.{ .tlsgd1 = target }, .none);
+                break :new .{ gop.index, 1 };
+            },
+        };
+
+        switch (elf.shdrPtr(elf.shndx.got)) {
+            inline else => |got_shdr, class| {
+                const new_size = elf.targetLoad(&got_shdr.size) + new_len * @sizeOf(class.ElfN().Addr);
+                elf.targetStore(&got_shdr.size, new_size);
+                try elf.shndx.got.node(elf).ensureMinimumSize(gpa, &elf.mf, new_size);
+            },
+        }
+        for (new_index..new_index + new_len) |got_index| {
+            elf.updateGotEntry(got_index);
+        }
+    }
+
     const ri: SymbolReloc.Index = @fromBackingInt(@intCast(elf.symbol_relocs.items.len));
     const first_target_reloc = &target.index(elf).ptr(elf).first_target_reloc;
     const next = first_target_reloc.*;
@@ -9931,16 +9995,21 @@ fn addSymbolRelocAssumeCapacityInner(
     elf.symbol_relocs.appendAssumeCapacity(.{
         .node = node.toOptional(),
         .offset = offset,
-        .target = target,
+        .target_symbol = target,
         .addend = addend,
-        .type = @"type",
+        .bits = .{
+            .type = @"type",
+            .result = .ok,
+        },
         .next = next,
         .prev = .none,
         .rela_index = .none,
-        .result = .ok,
     });
     if (@"type".dependsOnTlsSize(elf)) {
-        elf.tls_size_symbol_relocs.putAssumeCapacityNoClobber(ri, {});
+        try elf.tls_size_symbol_relocs.putNoClobber(gpa, ri, {});
+    }
+    if (@"type".dependsOnGotAddress()) {
+        try elf.got_relocs.put(gpa, ri, {});
     }
     try ri.get(elf).updateDynamicReloc(elf);
 
@@ -10046,95 +10115,6 @@ fn addNodeRelocAssumeCapacity(
         },
     }
 }
-fn addGotRelocAssumeCapacity(
-    elf: *Elf,
-    node: MappedFile.Node.Index,
-    offset: u64,
-    target: GotKey,
-    addend: i64,
-    @"type": GotReloc.Type,
-) void {
-    assert(elf.ehdrType() != .REL);
-    switch (elf.getNode(node)) {
-        .deleted,
-        .archive,
-        .archive_header,
-        .archive_input_member,
-        .archive_elf_member_header,
-        .elf,
-        .ehdr,
-        .shdr,
-        .segment,
-        .copied_global,
-        .debug_shared,
-        .debug_addr,
-        .eh_frame_footer,
-        .debug_str_offsets,
-        .unit_padding,
-        .unit_frame,
-        .unit_frame_cie,
-        .unit_debug_info,
-        .unit_debug_info_header,
-        .unit_debug_info_footer,
-        .unit_debug_line,
-        .unit_debug_line_header,
-        .unit_debug_rnglists,
-        .const_debug_info,
-        .global_debug_info,
-        .func_frame_fde,
-        .func_debug_info,
-        .func_debug_line,
-        .decl_debug_info,
-        => unreachable, // cannot contain relocs,
-        .section,
-        .section_manual_size,
-        .uav,
-        => unreachable, // cannot contain GOT relocs
-        .input_section,
-        .nav,
-        .lazy_code,
-        .lazy_const_data,
-        => {},
-    }
-
-    const gop = elf.got.getOrPutAssumeCapacity(target);
-    if (!gop.found_existing) {
-        gop.value_ptr.* = .none;
-        const maybe_next_key: ?GotKey = switch (target) {
-            .reserved => null,
-            .tpoff => null,
-            .symbol => null,
-            .tlsld0 => .tlsld1,
-            .tlsgd0 => |sym| .{ .tlsgd1 = sym },
-            .tlsld1 => unreachable,
-            .tlsgd1 => unreachable,
-        };
-        switch (elf.shdrPtr(elf.shndx.got)) {
-            inline else => |got_shdr, class| {
-                const Addr = class.ElfN().Addr;
-                const old_size = elf.targetLoad(&got_shdr.size);
-                const new_entry_count = @as(u32, 1) + @intFromBool(maybe_next_key != null);
-                elf.targetStore(&got_shdr.size, @intCast(old_size + @sizeOf(Addr) * new_entry_count));
-            },
-        }
-        if (maybe_next_key) |next_key| {
-            elf.got.putAssumeCapacityNoClobber(next_key, .none);
-            elf.updateGotEntry(gop.index);
-            elf.updateGotEntry(gop.index + 1);
-        } else {
-            elf.updateGotEntry(gop.index);
-        }
-    }
-
-    elf.got_relocs.appendAssumeCapacity(.{
-        .node = .wrap(node),
-        .offset = offset,
-        .target = target,
-        .addend = addend,
-        .type = @"type",
-        .result = .ok,
-    });
-}
 fn updateGotEntry(elf: *Elf, got_index: usize) void {
     assert(elf.ehdrType() != .REL);
     const entry_value: union(enum) {
@@ -10193,15 +10173,6 @@ fn updateGotEntry(elf: *Elf, got_index: usize) void {
                 .addend = 0,
             } },
         },
-        .tlsgd1 => |sym| switch (elf.classifySymbolValue(sym)) {
-            .static => .{ .unsigned = sym.value(elf) },
-            .static_relative => unreachable, // TLS variables should be in TLS sections, which do not return `.static_relative`
-            .dynamic => .{ .reloc = .{
-                .type = .dtpOff(elf),
-                .dynsym_index = sym.unwrap().global.dynsymIndex(elf).?,
-                .addend = 0,
-            } },
-        },
         .tlsgd0 => |sym| switch (elf.base.comp.config.link_mode) {
             .static => val: {
                 assert(elf.base.comp.config.output_mode == .Exe); // static libraries don't have GOTs
@@ -10209,25 +10180,28 @@ fn updateGotEntry(elf: *Elf, got_index: usize) void {
             },
             .dynamic => .{ .reloc = .{
                 .type = .dtpMod(elf),
-                .dynsym_index = switch (elf.classifySymbolValue(sym)) {
-                    .static, .static_relative => 0,
-                    .dynamic => sym.unwrap().global.dynsymIndex(elf).?,
+                .dynsym_index = switch (sym) {
+                    .null => 0,
+                    else => switch (elf.classifySymbolValue(sym)) {
+                        .static, .static_relative => 0,
+                        .dynamic => sym.unwrap().global.dynsymIndex(elf).?,
+                    },
                 },
                 .addend = 0,
             } },
         },
-        .tlsld0 => switch (elf.base.comp.config.link_mode) {
-            .static => val: {
-                assert(elf.base.comp.config.output_mode == .Exe); // static libraries don't have GOTs
-                break :val .{ .unsigned = 1 }; // TLS module ID for executable
+        .tlsgd1 => |sym| switch (sym) {
+            .null => .{ .unsigned = 0 },
+            else => switch (elf.classifySymbolValue(sym)) {
+                .static => .{ .unsigned = sym.value(elf) },
+                .static_relative => unreachable, // TLS variables should be in TLS sections, which do not return `.static_relative`
+                .dynamic => .{ .reloc = .{
+                    .type = .dtpOff(elf),
+                    .dynsym_index = sym.unwrap().global.dynsymIndex(elf).?,
+                    .addend = 0,
+                } },
             },
-            .dynamic => .{ .reloc = .{
-                .type = .dtpMod(elf),
-                .dynsym_index = 0,
-                .addend = 0,
-            } },
         },
-        .tlsld1 => .{ .unsigned = 0 },
     };
 
     // First, write to the GOT itself. If we're planning to use a relocation, we'll just write zeroes.
@@ -10994,7 +10968,7 @@ pub fn idle(elf: *Elf) link.Error!bool {
                     var ri = symtab_index.ptr(elf).first_target_reloc;
                     while (ri != .none) {
                         const reloc = ri.get(elf);
-                        assert(reloc.target == sym_id);
+                        assert(reloc.target_symbol == sym_id);
                         // In relocatables, every symbol relocation has an output relocation.
                         const rela_index = reloc.rela_index.unwrap().?;
                         reloc.relaSection(elf).relaUpdateSym(elf, rela_index, @backingInt(symtab_index));
@@ -11024,7 +10998,7 @@ pub fn idle(elf: *Elf) link.Error!bool {
                         var ri = symtab_index.ptr(elf).first_target_reloc;
                         while (ri != .none) {
                             const reloc = ri.get(elf);
-                            assert(reloc.target == sym_id);
+                            assert(reloc.target_symbol == sym_id);
                             // There may or may not be a runtime relocation for this symbol reloc.
                             if (reloc.rela_index.unwrap()) |rela_index| {
                                 elf.shndx.rela_dyn.relaUpdateSym(elf, rela_index, dynsym_index);
@@ -11615,8 +11589,8 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                     const rela_index = opt_rela_index.unwrap() orelse continue;
                     rela_dyn_shndx.relaAdjustOffset(elf, rela_index, old_addr, addr);
                 }
-                for (elf.got_relocs.items) |*reloc| {
-                    reloc.apply(elf);
+                for (elf.got_relocs.keys()) |ri| {
+                    ri.get(elf).apply(elf);
                 }
             } else if (shndx == elf.shndx.plt) {
                 elf.flushMovedNodeRelocs(ni, .{
@@ -11683,7 +11657,6 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
 
             elf.flushMovedNodeRelocs(ni, .{
                 .first_symbol_reloc = isi.ptrConst(elf).first_symbol_reloc,
-                .first_got_reloc = isi.ptrConst(elf).first_got_reloc,
             });
         },
         .copied_global => |global_name| {
@@ -11714,7 +11687,6 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                         .none,
                     .uav, .lazy_code, .lazy_const_data => .none,
                 },
-                .first_got_reloc = mi.firstGotReloc(elf),
             });
         },
         .debug_shared => |ss| {
@@ -12200,8 +12172,6 @@ fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
                             switch (got_key) {
                                 .reserved,
                                 .symbol,
-                                .tlsld0,
-                                .tlsld1,
                                 .tlsgd0,
                                 .tlsgd1,
                                 => {
