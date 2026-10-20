@@ -1923,49 +1923,28 @@ x{}
       as have the operators with higher precedence (those shown above).
       </p>
 
-      <details style="display:none;" id="ambig-details">
-      <summary style="cursor:pointer;">Toggle operator precedence ambiguity details</summary>
-      <p>
-      The operators that look <span class="ambig-chain">like this</span> have ambiguous precedence with the other operators
-      on the same line. Those that look <span class="ambig-nonchain">like this</span> also have ambiguous
-      precedence with themselves (they cannot be chained).
-      </p>
-      </details>
-
-      <script>
-        let ambig_details = document.getElementById("ambig-details");
-        ambig_details.style.display = 'block';
-        ambig_details.addEventListener("toggle", (event) => {
-          document.querySelectorAll('.ambig-chain').forEach(e => { e.classList.toggle('tok-number'); });
-          document.querySelectorAll('.ambig-nonchain').forEach(e => {
-            e.classList.toggle('tok-number');
-            e.style.borderBottom = ambig_details.open ? '1px dotted' : '';
-          });
-        });
-      </script>
-
       <p>
       For arithmetic operators:
       </p>
 
-      <pre><code>* / *% *| <span class="ambig-nonchain">%</span>
+      <pre>{#syntax#}* / *% *| %
 + - +% -% +| -|
-<span class="ambig-nonchain">==</span> <span class="ambig-nonchain">!=</span> <span class="ambig-nonchain">&lt;</span> <span class="ambig-nonchain">></span> <span class="ambig-nonchain">&lt;=</span> <span class="ambig-nonchain">>=</span>
-<span class="ambig-chain">and or</span></code></pre>
+== != < > <= >=
+and or{#endsyntax#}</pre>
 
       <p>
       For bitwise operators:
       </p>
 
-      <pre><code><span class="ambig-nonchain">&lt;&lt;</span> <span class="ambig-nonchain">&lt;&lt;|</span> <span class="ambig-nonchain">>></span> <span class="ambig-chain">& ^ |</span>
-<span class="ambig-nonchain">==</span> <span class="ambig-nonchain">!=</span> <span class="ambig-nonchain">&lt;</span> <span class="ambig-nonchain">></span> <span class="ambig-nonchain">&lt;=</span> <span class="ambig-nonchain">>=</span>
-<span class="ambig-chain">and or</span></code></pre>
+      <pre>{#syntax#}<< <<| >> & ^ |
+== != < > <= >=
+and or{#endsyntax#}</pre>
 
       <p>
       For null and error recovery operators:
       </p>
 
-      <pre><code><span class="ambig-chain">catch orelse</span></code></pre>
+      <pre>{#syntax#}catch orelse{#endsyntax#}</pre>
 
       <p>
       For error set operators:
