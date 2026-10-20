@@ -30628,11 +30628,18 @@ fn coerceArrayLike(
         return block.addTyOp(.array_to_vector, dest_ty, inst);
     }
 
-    const element_vals = try sema.arena.alloc(InternPool.Index, dest_len);
-    const element_refs = try sema.arena.alloc(Air.Inst.Ref, dest_len);
+    const dest_len_including_sent = try sema.usizeCast(block, dest_ty_src, dest_ty.arrayLenIncludingSentinel(zcu));
+    const element_vals = try sema.arena.alloc(InternPool.Index, dest_len_including_sent);
+    const element_refs = try sema.arena.alloc(Air.Inst.Ref, dest_len_including_sent);
     var runtime_src: ?LazySrcLoc = null;
 
     for (element_vals, element_refs, 0..) |*val, *ref, i| {
+        if (i == dest_len) {
+            const sentinel_val = dest_ty.sentinel(zcu).?;
+            val.* = sentinel_val.toIntern();
+            ref.* = Air.internedToRef(sentinel_val.toIntern());
+            break;
+        }
         const index_ref = Air.internedToRef((try pt.intValue(.usize, i)).toIntern());
         const src = inst_src; // TODO better source location
         const elem_src = inst_src; // TODO better source location
