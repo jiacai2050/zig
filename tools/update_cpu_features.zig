@@ -23,6 +23,16 @@ const FeatureOverride = struct {
     extra_deps: []const []const u8 = &.{},
 };
 
+const CpuOverride = struct {
+    llvm_name: []const u8,
+    /// If true, completely omit the CPU; as if it does not exist.
+    omit: bool = false,
+    zig_name: ?[]const u8 = null,
+    desc: ?[]const u8 = null,
+    omit_deps: []const []const u8 = &.{},
+    extra_deps: []const []const u8 = &.{},
+};
+
 const Cpu = struct {
     llvm_name: ?[]const u8,
     zig_name: []const u8,
@@ -44,9 +54,9 @@ const ArchTarget = struct {
         td_name: []const u8,
     },
     feature_overrides: []const FeatureOverride = &.{},
-    extra_cpus: []const Cpu = &.{},
     extra_features: []const Feature = &.{},
-    omit_cpus: []const []const u8 = &.{},
+    cpu_overrides: []const CpuOverride = &.{},
+    extra_cpus: []const Cpu = &.{},
     branch_quota: ?usize = null,
 };
 
@@ -432,6 +442,14 @@ const targets = [_]ArchTarget{
                 .flatten = true,
             },
         },
+        .cpu_overrides = &.{
+            .{
+                // Who thought this alias was a good idea? Upgrade your compiler and suddenly your
+                // programs SIGILL because this changed meaning. Brilliant.
+                .llvm_name = "apple-latest",
+                .omit = true,
+            },
+        },
         .extra_cpus = &.{
             .{
                 .llvm_name = null,
@@ -484,11 +502,6 @@ const targets = [_]ArchTarget{
                     "v8a",
                 },
             },
-        },
-        .omit_cpus = &.{
-            // Who thought this alias was a good idea? Upgrade your compiler and suddenly your
-            // programs SIGILL because this changed meaning. Brilliant.
-            "apple-latest",
         },
     },
     .{
@@ -752,63 +765,6 @@ const targets = [_]ArchTarget{
             .{
                 .llvm_name = "swift",
                 .flatten = true,
-            },
-
-            .{
-                .llvm_name = "cortex-m4",
-                .omit_deps = &.{"vfp4d16sp"},
-            },
-            .{
-                .llvm_name = "cortex-m7",
-                .omit_deps = &.{"fp_armv8d16"},
-            },
-            .{
-                .llvm_name = "cortex-m33",
-                .omit_deps = &.{ "dsp", "fp_armv8d16sp" },
-            },
-            .{
-                .llvm_name = "cortex-m35p",
-                .omit_deps = &.{ "dsp", "fp_armv8d16sp" },
-            },
-            .{
-                .llvm_name = "cortex-m52",
-                .omit_deps = &.{ "fp_armv8d16", "mve_fp", "pacbti" },
-            },
-            .{
-                .llvm_name = "cortex-m55",
-                .omit_deps = &.{ "fp_armv8d16", "mve_fp" },
-            },
-            .{
-                .llvm_name = "cortex-m85",
-                .omit_deps = &.{ "fp_armv8d16", "mve_fp", "pacbti" },
-            },
-            .{
-                .llvm_name = "cortex-r5",
-                .omit_deps = &.{"vfp3d16"},
-            },
-            .{
-                .llvm_name = "cortex-r7",
-                .omit_deps = &.{ "fp16", "vfp3d16" },
-            },
-            .{
-                .llvm_name = "cortex-r8",
-                .omit_deps = &.{ "fp16", "vfp3d16" },
-            },
-            .{
-                .llvm_name = "cortex-r52",
-                .omit_deps = &.{ "fp_armv8", "neon" },
-            },
-            .{
-                .llvm_name = "cortex-r52plus",
-                .omit_deps = &.{ "fp_armv8", "neon" },
-            },
-            .{
-                .llvm_name = "star-mc1",
-                .omit_deps = &.{ "dsp", "fp_armv8d16sp" },
-            },
-            .{
-                .llvm_name = "star-mc3",
-                .omit_deps = &.{ "fp_armv8d16", "mve_fp", "pacbti" },
             },
 
             .{
@@ -1121,23 +1077,6 @@ const targets = [_]ArchTarget{
                 .zig_name = "has_v9_7a",
             },
         },
-        .extra_cpus = &.{
-            .{
-                .llvm_name = "generic",
-                .zig_name = "baseline",
-                .features = &.{"v7a"},
-            },
-            .{
-                .llvm_name = null,
-                .zig_name = "exynos_m1",
-                .features = &.{ "v8a", "exynos" },
-            },
-            .{
-                .llvm_name = null,
-                .zig_name = "exynos_m2",
-                .features = &.{ "v8a", "exynos" },
-            },
-        },
         .extra_features = &.{
             // LLVM removed support for v2 and v3 but zig wants to support targeting old hardware
             .{
@@ -1159,6 +1098,81 @@ const targets = [_]ArchTarget{
                 .zig_name = "v3m",
                 .desc = "ARMv3m architecture",
                 .deps = &.{"strict_align"},
+            },
+        },
+        .cpu_overrides = &.{
+            .{
+                .llvm_name = "cortex-m4",
+                .omit_deps = &.{"vfp4d16sp"},
+            },
+            .{
+                .llvm_name = "cortex-m7",
+                .omit_deps = &.{"fp_armv8d16"},
+            },
+            .{
+                .llvm_name = "cortex-m33",
+                .omit_deps = &.{ "dsp", "fp_armv8d16sp" },
+            },
+            .{
+                .llvm_name = "cortex-m35p",
+                .omit_deps = &.{ "dsp", "fp_armv8d16sp" },
+            },
+            .{
+                .llvm_name = "cortex-m52",
+                .omit_deps = &.{ "fp_armv8d16", "mve_fp", "pacbti" },
+            },
+            .{
+                .llvm_name = "cortex-m55",
+                .omit_deps = &.{ "fp_armv8d16", "mve_fp" },
+            },
+            .{
+                .llvm_name = "cortex-m85",
+                .omit_deps = &.{ "fp_armv8d16", "mve_fp", "pacbti" },
+            },
+            .{
+                .llvm_name = "cortex-r5",
+                .omit_deps = &.{"vfp3d16"},
+            },
+            .{
+                .llvm_name = "cortex-r7",
+                .omit_deps = &.{ "fp16", "vfp3d16" },
+            },
+            .{
+                .llvm_name = "cortex-r8",
+                .omit_deps = &.{ "fp16", "vfp3d16" },
+            },
+            .{
+                .llvm_name = "cortex-r52",
+                .omit_deps = &.{ "fp_armv8", "neon" },
+            },
+            .{
+                .llvm_name = "cortex-r52plus",
+                .omit_deps = &.{ "fp_armv8", "neon" },
+            },
+            .{
+                .llvm_name = "star-mc1",
+                .omit_deps = &.{ "dsp", "fp_armv8d16sp" },
+            },
+            .{
+                .llvm_name = "star-mc3",
+                .omit_deps = &.{ "fp_armv8d16", "mve_fp", "pacbti" },
+            },
+        },
+        .extra_cpus = &.{
+            .{
+                .llvm_name = "generic",
+                .zig_name = "baseline",
+                .features = &.{"v7a"},
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "exynos_m1",
+                .features = &.{ "v8a", "exynos" },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "exynos_m2",
+                .features = &.{ "v8a", "exynos" },
             },
         },
     },
@@ -1470,6 +1484,24 @@ const targets = [_]ArchTarget{
             .name = "LoongArch",
             .td_name = "LoongArch",
         },
+        .cpu_overrides = &.{
+            .{
+                .llvm_name = "generic",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "generic-la64",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "loongarch32",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "loongarch64",
+                .omit = true,
+            },
+        },
         .extra_cpus = &.{
             .{
                 .llvm_name = null,
@@ -1520,12 +1552,6 @@ const targets = [_]ArchTarget{
                     "ual",
                 },
             },
-        },
-        .omit_cpus = &.{
-            "generic",
-            "generic-la64",
-            "loongarch32",
-            "loongarch64",
         },
     },
     .{
@@ -1607,6 +1633,12 @@ const targets = [_]ArchTarget{
                 .omit = true,
             },
         },
+        .cpu_overrides = &.{
+            .{
+                .llvm_name = "ppc32",
+                .omit = true,
+            },
+        },
         .extra_cpus = &.{
             .{
                 .llvm_name = null,
@@ -1642,9 +1674,6 @@ const targets = [_]ArchTarget{
                     "stfiwx",
                 },
             },
-        },
-        .omit_cpus = &.{
-            "ppc32",
         },
     },
     .{
@@ -1744,6 +1773,12 @@ const targets = [_]ArchTarget{
                 .deps = &.{},
             },
         },
+        .cpu_overrides = &.{
+            .{
+                .llvm_name = "generic",
+                .omit = true,
+            },
+        },
         .extra_cpus = &.{
             .{
                 .llvm_name = null,
@@ -1760,9 +1795,6 @@ const targets = [_]ArchTarget{
                 .zig_name = "ve30",
                 .features = &.{ "ve3", "vpu" },
             },
-        },
-        .omit_cpus = &.{
-            "generic",
         },
     },
     .{
@@ -1796,6 +1828,16 @@ const targets = [_]ArchTarget{
                 .zig_name = "nontrapping_bulk_memory_len0",
                 .desc = "Bulk memory operations with a zero length do not trap",
                 .deps = &.{"bulk_memory_opt"},
+            },
+        },
+        .cpu_overrides = &.{
+            .{
+                .llvm_name = "bleeding-edge",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "generic",
+                .omit = true,
             },
         },
         .extra_cpus = &.{
@@ -1836,10 +1878,6 @@ const targets = [_]ArchTarget{
                 },
             },
         },
-        .omit_cpus = &.{
-            "bleeding-edge",
-            "generic",
-        },
     },
     .{
         .zig_name = "x86",
@@ -1865,20 +1903,58 @@ const targets = [_]ArchTarget{
                 .omit = true,
             },
             .{
-                .llvm_name = "alderlake",
-                .extra_deps = &.{ "smap", "smep" },
+                .llvm_name = "sse4.2",
+                .extra_deps = &.{"crc32"},
             },
+        },
+        .extra_features = &.{
+            // Features removed from LLVM
+            .{
+                .zig_name = "3dnow",
+                .desc = "Enable 3DNow! instructions",
+                .deps = &.{"mmx"},
+            },
+            .{
+                .zig_name = "3dnowa",
+                .desc = "Enable 3DNow! Athlon instructions",
+                .deps = &.{"3dnow"},
+            },
+            .{
+                .zig_name = "avx512er",
+                .desc = "Enable AVX-512 Exponential and Reciprocal Instructions",
+                .deps = &.{"avx512f"},
+            },
+            .{
+                .zig_name = "avx512pf",
+                .desc = "Enable AVX-512 PreFetch Instructions",
+                .deps = &.{"avx512f"},
+            },
+            .{
+                .zig_name = "prefetchwt1",
+                .desc = "Prefetch with Intent to Write and T1 Hint",
+                .deps = &.{},
+            },
+            // Custom Zig features
+            .{
+                .zig_name = "bsf_bsr_0_clobbers_result",
+                .desc = "BSF/BSR may clobber the lower 32-bits of the result register when the source is zero",
+                .deps = &.{},
+            },
+            .{
+                .zig_name = "smap",
+                .desc = "Enable Supervisor Mode Access Prevention",
+                .deps = &.{},
+            },
+            .{
+                .zig_name = "smep",
+                .desc = "Enable Supervisor Mode Execution Prevention",
+                .deps = &.{},
+            },
+        },
+        .cpu_overrides = &.{
             .{
                 .llvm_name = "amdfam10",
                 .extra_deps = &.{"3dnowa"},
-            },
-            .{
-                .llvm_name = "arrowlake",
-                .extra_deps = &.{ "smap", "smep" },
-            },
-            .{
-                .llvm_name = "arrowlake-s",
-                .extra_deps = &.{ "smap", "smep" },
             },
             .{
                 .llvm_name = "athlon",
@@ -2057,8 +2133,16 @@ const targets = [_]ArchTarget{
                 .extra_deps = &.{"3dnow"},
             },
             .{
-                .llvm_name = "sse4.2",
-                .extra_deps = &.{"crc32"},
+                .llvm_name = "alderlake",
+                .extra_deps = &.{ "smap", "smep" },
+            },
+            .{
+                .llvm_name = "arrowlake",
+                .extra_deps = &.{ "smap", "smep" },
+            },
+            .{
+                .llvm_name = "arrowlake-s",
+                .extra_deps = &.{ "smap", "smep" },
             },
             .{
                 .llvm_name = "znver1",
@@ -2080,49 +2164,131 @@ const targets = [_]ArchTarget{
                 .llvm_name = "znver5",
                 .extra_deps = &.{ "smap", "smep" },
             },
-        },
-        .extra_features = &.{
-            // Features removed from LLVM
+
+            // LLVM defines a bunch of dumb aliases with foreach loops in X86.td.
             .{
-                .zig_name = "3dnow",
-                .desc = "Enable 3DNow! instructions",
-                .deps = &.{"mmx"},
+                .llvm_name = "pentium_mmx",
+                .omit = true,
             },
             .{
-                .zig_name = "3dnowa",
-                .desc = "Enable 3DNow! Athlon instructions",
-                .deps = &.{"3dnow"},
+                .llvm_name = "pentium_pro",
+                .omit = true,
             },
             .{
-                .zig_name = "avx512er",
-                .desc = "Enable AVX-512 Exponential and Reciprocal Instructions",
-                .deps = &.{"avx512f"},
+                .llvm_name = "pentium_ii",
+                .omit = true,
             },
             .{
-                .zig_name = "avx512pf",
-                .desc = "Enable AVX-512 PreFetch Instructions",
-                .deps = &.{"avx512f"},
+                .llvm_name = "pentium_3m",
+                .omit = true,
             },
             .{
-                .zig_name = "prefetchwt1",
-                .desc = "Prefetch with Intent to Write and T1 Hint",
-                .deps = &.{},
-            },
-            // Custom Zig features
-            .{
-                .zig_name = "bsf_bsr_0_clobbers_result",
-                .desc = "BSF/BSR may clobber the lower 32-bits of the result register when the source is zero",
-                .deps = &.{},
+                .llvm_name = "pentium_iii",
+                .omit = true,
             },
             .{
-                .zig_name = "smap",
-                .desc = "Enable Supervisor Mode Access Prevention",
-                .deps = &.{},
+                .llvm_name = "pentium_iii_no_xmm_regs",
+                .omit = true,
             },
             .{
-                .zig_name = "smep",
-                .desc = "Enable Supervisor Mode Execution Prevention",
-                .deps = &.{},
+                .llvm_name = "pentium_m",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "pentium4m",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "pentium_4",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "pentium_4_sse3",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "core_2_duo_ssse3",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "core_2_duo_sse4_1",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "atom_sse4_2",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "goldmont-plus",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "core_i7_sse4_2",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "core_aes_pclmulqdq",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "corei7-avx",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "core_2nd_gen_avx",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "core-avx-i",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "core_3rd_gen_avx",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "core-avx2",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "core_4th_gen_avx",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "core_4th_gen_avx_tsx",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "core_5th_gen_avx",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "core_5th_gen_avx_tsx",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "mic_avx512",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "skylake-avx512",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "icelake-client",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "icelake-server",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "graniterapids_d",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "arrowlake_s",
+                .omit = true,
             },
         },
         .extra_cpus = &.{
@@ -2131,40 +2297,6 @@ const targets = [_]ArchTarget{
                 .zig_name = "i86",
                 .features = &.{"16bit_mode"},
             },
-        },
-        .omit_cpus = &.{
-            // LLVM defines a bunch of dumb aliases with foreach loops in X86.td.
-            "pentium_mmx",
-            "pentium_pro",
-            "pentium_ii",
-            "pentium_3m",
-            "pentium_iii_no_xmm_regs",
-            "pentium_iii",
-            "pentium_m",
-            "pentium4m",
-            "pentium_4",
-            "pentium_4_sse3",
-            "core_2_duo_ssse3",
-            "core_2_duo_sse4_1",
-            "atom_sse4_2",
-            "goldmont_plus",
-            "core_i7_sse4_2",
-            "core_aes_pclmulqdq",
-            "corei7-avx",
-            "core_2nd_gen_avx",
-            "core-avx-i",
-            "core_3rd_gen_avx",
-            "core-avx2",
-            "core_4th_gen_avx",
-            "core_4th_gen_avx_tsx",
-            "core_5th_gen_avx",
-            "core_5th_gen_avx_tsx",
-            "mic_avx512",
-            "skylake_avx512",
-            "icelake_client",
-            "icelake_server",
-            "graniterapids_d",
-            "arrowlake_s",
         },
     },
     .{
@@ -2195,6 +2327,16 @@ const targets = [_]ArchTarget{
                 .deps = &.{"xs3"},
             },
         },
+        .cpu_overrides = &.{
+            .{
+                .llvm_name = "generic",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "xs1b-generic",
+                .omit = true,
+            },
+        },
         .extra_cpus = &.{
             .{
                 .llvm_name = null,
@@ -2211,10 +2353,6 @@ const targets = [_]ArchTarget{
                 .zig_name = "xs3a",
                 .features = &.{ "fpu", "vpu" },
             },
-        },
-        .omit_cpus = &.{
-            "generic",
-            "xs1b-generic",
         },
     },
     .{
@@ -2491,28 +2629,25 @@ fn processOneTargetInner(io: Io, job: Job) !void {
                 if (hasSuperclass(&kv.value_ptr.object, "Processor")) {
                     const llvm_name = kv.value_ptr.object.get("Name").?.string;
                     if (llvm_name.len == 0) continue;
-                    const omitted = for (target.omit_cpus) |omit_cpu_name| {
-                        if (mem.eql(u8, omit_cpu_name, llvm_name)) break true;
-                    } else false;
-                    if (omitted) continue;
 
                     var zig_name = try llvmNameToZigName(arena, llvm_name);
                     var deps = std.array_list.Managed([]const u8).init(arena);
                     var omit_deps: []const []const u8 = &.{};
                     var extra_deps: []const []const u8 = &.{};
-                    for (target.feature_overrides) |feature_override| {
-                        if (mem.eql(u8, llvm_name, feature_override.llvm_name)) {
-                            if (feature_override.omit) {
-                                continue;
+                    const omitted = for (target.cpu_overrides) |cpu_override| {
+                        if (mem.eql(u8, llvm_name, cpu_override.llvm_name)) {
+                            if (cpu_override.omit) {
+                                break true;
                             }
-                            if (feature_override.zig_name) |override_name| {
+                            if (cpu_override.zig_name) |override_name| {
                                 zig_name = override_name;
                             }
-                            omit_deps = feature_override.omit_deps;
-                            extra_deps = feature_override.extra_deps;
-                            break;
+                            omit_deps = cpu_override.omit_deps;
+                            extra_deps = cpu_override.extra_deps;
+                            break false;
                         }
-                    }
+                    } else false;
+                    if (omitted) continue;
                     const features = kv.value_ptr.object.get("Features").?.array;
                     for (features.items) |feature| {
                         const feature_key = feature.object.get("def").?.string;
@@ -2554,8 +2689,8 @@ fn processOneTargetInner(io: Io, job: Job) !void {
 
                     if (cpu_aliases.get(zig_name)) |aliases| {
                         alias_it: for (aliases.items) |alias| {
-                            for (target.omit_cpus) |omit_cpu_name| {
-                                if (mem.eql(u8, omit_cpu_name, alias.llvm)) continue :alias_it;
+                            for (target.cpu_overrides) |cpu_override| {
+                                if (mem.eql(u8, alias.llvm, cpu_override.llvm_name) and cpu_override.omit) continue :alias_it;
                             }
 
                             try all_cpus.append(.{
