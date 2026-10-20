@@ -13560,13 +13560,23 @@ fn zirArrayCat(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
 
     const lhs_len = try sema.usizeCast(block, lhs_src, lhs_info.len);
     const rhs_len = try sema.usizeCast(block, rhs_src, rhs_info.len);
-    const result_len = std.math.add(usize, lhs_len, rhs_len) catch |err| switch (err) {
-        error.Overflow => return sema.fail(
+    const result_len, const result_len_with_sent = blk: {
+        if (std.math.add(usize, lhs_len, rhs_len)) |result_len| {
+            const sent_len = @intFromBool(res_sent_val != null);
+            if (std.math.add(usize, result_len, sent_len)) |with_sent| {
+                break :blk .{ result_len, with_sent };
+            } else |err| switch (err) {
+                error.Overflow => {},
+            }
+        } else |err| switch (err) {
+            error.Overflow => {},
+        }
+        return sema.fail(
             block,
             src,
             "concatenating arrays of length {d} and {d} produces an array too large for this compiler implementation to handle",
             .{ lhs_len, rhs_len },
-        ),
+        );
     };
 
     const result_ty = try pt.arrayType(.{
@@ -13604,7 +13614,7 @@ fn zirArrayCat(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             else
                 rhs_val;
 
-            const element_vals = try sema.arena.alloc(InternPool.Index, result_len);
+            const element_vals = try sema.arena.alloc(InternPool.Index, result_len_with_sent);
             var elem_i: u32 = 0;
             while (elem_i < lhs_len) : (elem_i += 1) {
                 const lhs_elem_i = elem_i;
@@ -13631,6 +13641,9 @@ fn zirArrayCat(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
                 const coerced_elem_val_inst = try sema.coerce(block, resolved_elem_ty, .fromValue(elem_val), operand_src);
                 const coerced_elem_val = sema.resolveValue(coerced_elem_val_inst).?;
                 element_vals[elem_i] = coerced_elem_val.toIntern();
+            }
+            if (res_sent_val) |v| {
+                element_vals[result_len] = v.toIntern();
             }
             return sema.addConstantMaybeRef(
                 try pt.aggregateValue(result_ty, element_vals),
