@@ -618,3 +618,13 @@ test "comptime store to sentinel-terminated array in an extern struct" {
         assert(x.a[2] == 0);
     }
 }
+
+test "comptime store to repeated string bytes" {
+    comptime {
+        var x = "aa".*;
+        x[0] = 'b';
+        assert(x[0] == 'b');
+        assert(x[1] == 'a');
+        assert(x[2] == 0);
+    }
+}
