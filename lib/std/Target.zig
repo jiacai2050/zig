@@ -2090,12 +2090,12 @@ pub const Cpu = struct {
                 .amdgcn => &amdgcn.cpu.gfx906,
                 .arm => switch (os.tag) {
                     .@"3ds" => &arm.cpu.mpcore,
-                    .vita => &arm.cpu.cortex_a9,
+                    .vita => &arm.cpu.kermit,
                     .gba => &arm.cpu.arm7tdmi,
                     else => &arm.cpu.baseline,
                 },
                 .thumb => switch (os.tag) {
-                    .vita => &arm.cpu.cortex_a9,
+                    .vita => &arm.cpu.kermit,
                     .gba => &arm.cpu.arm7tdmi,
                     else => &arm.cpu.baseline,
                 },

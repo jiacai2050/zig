@@ -843,6 +843,7 @@ const targets = [_]ArchTarget{
             .{
                 .llvm_name = "armv7-a",
                 .zig_name = "v7a",
+                .omit_deps = &.{"neon"},
             },
             .{
                 .llvm_name = "armv7-m",
@@ -867,58 +868,72 @@ const targets = [_]ArchTarget{
             .{
                 .llvm_name = "armv7ve",
                 .zig_name = "v7ve",
+                .omit_deps = &.{"neon"},
             },
             .{
                 .llvm_name = "armv8.1-a",
                 .zig_name = "v8_1a",
+                .omit_deps = &.{"crypto"},
             },
             .{
                 .llvm_name = "armv8.1-m.main",
                 .zig_name = "v8_1m_main",
+                .omit_deps = &.{"8msecext"},
             },
             .{
                 .llvm_name = "armv8.2-a",
                 .zig_name = "v8_2a",
+                .omit_deps = &.{"crypto"},
             },
             .{
                 .llvm_name = "armv8.3-a",
                 .zig_name = "v8_3a",
+                .omit_deps = &.{"crypto"},
             },
             .{
                 .llvm_name = "armv8.4-a",
                 .zig_name = "v8_4a",
+                .omit_deps = &.{"crypto"},
             },
             .{
                 .llvm_name = "armv8.5-a",
                 .zig_name = "v8_5a",
+                .omit_deps = &.{"crypto"},
             },
             .{
                 .llvm_name = "armv8.6-a",
                 .zig_name = "v8_6a",
+                .omit_deps = &.{"crypto"},
             },
             .{
                 .llvm_name = "armv8.7-a",
                 .zig_name = "v8_7a",
+                .omit_deps = &.{"crypto"},
             },
             .{
                 .llvm_name = "armv8.8-a",
                 .zig_name = "v8_8a",
+                .omit_deps = &.{"crypto"},
             },
             .{
                 .llvm_name = "armv8.9-a",
                 .zig_name = "v8_9a",
+                .omit_deps = &.{"crypto"},
             },
             .{
                 .llvm_name = "armv8-a",
                 .zig_name = "v8a",
+                .omit_deps = &.{"crypto"},
             },
             .{
                 .llvm_name = "armv8-m.base",
                 .zig_name = "v8m",
+                .omit_deps = &.{"8msecext"},
             },
             .{
                 .llvm_name = "armv8-m.main",
                 .zig_name = "v8m_main",
+                .omit_deps = &.{"8msecext"},
             },
             .{
                 .llvm_name = "armv8-r",
@@ -935,6 +950,7 @@ const targets = [_]ArchTarget{
             .{
                 .llvm_name = "armv9.3-a",
                 .zig_name = "v9_3a",
+                .omit_deps = &.{"crypto"},
             },
             .{
                 .llvm_name = "armv9.4-a",
@@ -1102,6 +1118,78 @@ const targets = [_]ArchTarget{
         },
         .model_overrides = &.{
             .{
+                .llvm_name = "cortex-a5",
+                .omit_deps = &.{"vfp4"},
+            },
+            .{
+                .llvm_name = "cortex-a7",
+                .omit_deps = &.{"vfp4"},
+            },
+            .{
+                .llvm_name = "cortex-a9",
+                .omit_deps = &.{"fp16"},
+            },
+            .{
+                .llvm_name = "cortex-a12",
+                .omit_deps = &.{"vfp4"},
+            },
+            .{
+                .llvm_name = "cortex-a15",
+                .omit_deps = &.{"vfp4"},
+            },
+            .{
+                .llvm_name = "cortex-a17",
+                .omit_deps = &.{"vfp4"},
+            },
+            .{
+                .llvm_name = "cortex-a32",
+                .omit_deps = &.{"crypto"},
+            },
+            .{
+                .llvm_name = "cortex-a35",
+                .omit_deps = &.{"crypto"},
+            },
+            .{
+                .llvm_name = "cortex-a53",
+                .omit_deps = &.{"crypto"},
+            },
+            .{
+                .llvm_name = "cortex-a57",
+                .omit_deps = &.{"crypto"},
+            },
+            .{
+                .llvm_name = "cortex-a72",
+                .omit_deps = &.{"crypto"},
+            },
+            .{
+                .llvm_name = "cortex-a73",
+                .omit_deps = &.{"crypto"},
+            },
+            .{
+                .llvm_name = "cortex-a76",
+                .omit_deps = &.{"crypto"},
+            },
+            .{
+                .llvm_name = "cortex-a76ae",
+                .omit_deps = &.{"crypto"},
+            },
+            .{
+                .llvm_name = "cortex-a77",
+                .omit_deps = &.{"crypto"},
+            },
+            .{
+                .llvm_name = "cortex-a78",
+                .omit_deps = &.{"crypto"},
+            },
+            .{
+                .llvm_name = "cortex-a78ae",
+                .omit_deps = &.{"crypto"},
+            },
+            .{
+                .llvm_name = "cortex-a78c",
+                .omit_deps = &.{"crypto"},
+            },
+            .{
                 .llvm_name = "cortex-m4",
                 .omit_deps = &.{"vfp4d16sp"},
             },
@@ -1127,6 +1215,7 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = "cortex-m85",
+                .extra_deps = &.{"8msecext"},
                 .omit_deps = &.{ "fp_armv8d16", "mve_fp", "pacbti" },
             },
             .{
@@ -1150,6 +1239,26 @@ const targets = [_]ArchTarget{
                 .omit_deps = &.{ "fp_armv8", "neon" },
             },
             .{
+                .llvm_name = "cortex-x1",
+                .omit_deps = &.{"crypto"},
+            },
+            .{
+                .llvm_name = "cortex-x1c",
+                .omit_deps = &.{"crypto"},
+            },
+            .{
+                .llvm_name = "krait",
+                .extra_deps = &.{"neon"},
+            },
+            .{
+                .llvm_name = "neoverse-n1",
+                .omit_deps = &.{"crypto"},
+            },
+            .{
+                .llvm_name = "neoverse-v1",
+                .omit_deps = &.{"crypto"},
+            },
+            .{
                 .llvm_name = "star-mc1",
                 .omit_deps = &.{ "dsp", "fp_armv8d16sp" },
             },
@@ -1157,12 +1266,16 @@ const targets = [_]ArchTarget{
                 .llvm_name = "star-mc3",
                 .omit_deps = &.{ "fp_armv8d16", "mve_fp", "pacbti" },
             },
+            .{
+                .llvm_name = "swift",
+                .extra_deps = &.{"neon"},
+            },
         },
         .extra_models = &.{
             .{
                 .llvm_name = "generic",
                 .zig_name = "baseline",
-                .features = &.{"v7a"},
+                .features = &.{ "v7a", "vfp3d16" },
             },
             .{
                 .llvm_name = null,
@@ -1173,6 +1286,26 @@ const targets = [_]ArchTarget{
                 .llvm_name = null,
                 .zig_name = "exynos_m2",
                 .features = &.{ "v8a", "exynos" },
+            },
+            .{
+                .llvm_name = "cortex-a9",
+                .zig_name = "kermit",
+                .features = &.{
+                    "avoid_partial_cpsr",
+                    "expand_fp_mlx",
+                    "fp16",
+                    "mp",
+                    "muxed_units",
+                    "neon",
+                    "neon_fpmovs",
+                    "prefer_vmovsr",
+                    "ret_addr_stack",
+                    "trustzone",
+                    "v7a",
+                    "vldn_align",
+                    "vmlx_forwarding",
+                    "vmlx_hazards",
+                },
             },
         },
     },
