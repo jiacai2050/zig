@@ -23,7 +23,7 @@ const FeatureOverride = struct {
     extra_deps: []const []const u8 = &.{},
 };
 
-const CpuOverride = struct {
+const ModelOverride = struct {
     llvm_name: []const u8,
     /// If true, completely omit the CPU; as if it does not exist.
     omit: bool = false,
@@ -33,7 +33,7 @@ const CpuOverride = struct {
     extra_deps: []const []const u8 = &.{},
 };
 
-const Cpu = struct {
+const Model = struct {
     llvm_name: ?[]const u8,
     zig_name: []const u8,
     features: []const []const u8,
@@ -55,8 +55,8 @@ const ArchTarget = struct {
     },
     feature_overrides: []const FeatureOverride = &.{},
     extra_features: []const Feature = &.{},
-    cpu_overrides: []const CpuOverride = &.{},
-    extra_cpus: []const Cpu = &.{},
+    model_overrides: []const ModelOverride = &.{},
+    extra_models: []const Model = &.{},
     branch_quota: ?usize = null,
 };
 
@@ -442,7 +442,7 @@ const targets = [_]ArchTarget{
                 .flatten = true,
             },
         },
-        .cpu_overrides = &.{
+        .model_overrides = &.{
             .{
                 // Who thought this alias was a good idea? Upgrade your compiler and suddenly your
                 // programs SIGILL because this changed meaning. Brilliant.
@@ -450,7 +450,7 @@ const targets = [_]ArchTarget{
                 .omit = true,
             },
         },
-        .extra_cpus = &.{
+        .extra_models = &.{
             .{
                 .llvm_name = null,
                 .zig_name = "exynos_m1",
@@ -529,7 +529,7 @@ const targets = [_]ArchTarget{
                 .deps = &.{},
             },
         },
-        .extra_cpus = &.{
+        .extra_models = &.{
             .{
                 .llvm_name = null,
                 .zig_name = "ev4",
@@ -1100,7 +1100,7 @@ const targets = [_]ArchTarget{
                 .deps = &.{"strict_align"},
             },
         },
-        .cpu_overrides = &.{
+        .model_overrides = &.{
             .{
                 .llvm_name = "cortex-m4",
                 .omit_deps = &.{"vfp4d16sp"},
@@ -1158,7 +1158,7 @@ const targets = [_]ArchTarget{
                 .omit_deps = &.{ "fp_armv8d16", "mve_fp", "pacbti" },
             },
         },
-        .extra_cpus = &.{
+        .extra_models = &.{
             .{
                 .llvm_name = "generic",
                 .zig_name = "baseline",
@@ -1318,7 +1318,7 @@ const targets = [_]ArchTarget{
                 .deps = &.{ "max_2", "v1_1" },
             },
         },
-        .extra_cpus = &.{
+        .extra_models = &.{
             .{
                 .llvm_name = null,
                 .zig_name = "ts_1",
@@ -1454,7 +1454,7 @@ const targets = [_]ArchTarget{
                 .deps = &.{"v3_2"},
             },
         },
-        .extra_cpus = &.{
+        .extra_models = &.{
             .{
                 .llvm_name = null,
                 .zig_name = "coolidge_v1",
@@ -1484,7 +1484,7 @@ const targets = [_]ArchTarget{
             .name = "LoongArch",
             .td_name = "LoongArch",
         },
-        .cpu_overrides = &.{
+        .model_overrides = &.{
             .{
                 .llvm_name = "generic",
                 .omit = true,
@@ -1502,7 +1502,7 @@ const targets = [_]ArchTarget{
                 .omit = true,
             },
         },
-        .extra_cpus = &.{
+        .extra_models = &.{
             .{
                 .llvm_name = null,
                 .zig_name = "generic_la64",
@@ -1581,7 +1581,7 @@ const targets = [_]ArchTarget{
                 .deps = &.{},
             },
         },
-        .extra_cpus = &.{
+        .extra_models = &.{
             .{
                 .llvm_name = null,
                 .zig_name = "r3000a",
@@ -1633,13 +1633,13 @@ const targets = [_]ArchTarget{
                 .omit = true,
             },
         },
-        .cpu_overrides = &.{
+        .model_overrides = &.{
             .{
                 .llvm_name = "ppc32",
                 .omit = true,
             },
         },
-        .extra_cpus = &.{
+        .extra_models = &.{
             .{
                 .llvm_name = null,
                 .zig_name = "cell",
@@ -1686,7 +1686,7 @@ const targets = [_]ArchTarget{
                 .deps = &.{},
             },
         },
-        .extra_cpus = &.{
+        .extra_models = &.{
             .{
                 .llvm_name = null,
                 .zig_name = "p1",
@@ -1707,7 +1707,7 @@ const targets = [_]ArchTarget{
         },
         .branch_quota = 2000,
         .extra_features = spirv_extra_features,
-        .extra_cpus = &.{
+        .extra_models = &.{
             .{
                 .llvm_name = null,
                 .zig_name = "vulkan_v1_2",
@@ -1733,7 +1733,7 @@ const targets = [_]ArchTarget{
                 .flatten = true,
             },
         },
-        .extra_cpus = &.{
+        .extra_models = &.{
             .{
                 .llvm_name = null,
                 .zig_name = "baseline_rv32",
@@ -1773,13 +1773,13 @@ const targets = [_]ArchTarget{
                 .deps = &.{},
             },
         },
-        .cpu_overrides = &.{
+        .model_overrides = &.{
             .{
                 .llvm_name = "generic",
                 .omit = true,
             },
         },
-        .extra_cpus = &.{
+        .extra_models = &.{
             .{
                 .llvm_name = null,
                 .zig_name = "ve10",
@@ -1830,7 +1830,7 @@ const targets = [_]ArchTarget{
                 .deps = &.{"bulk_memory_opt"},
             },
         },
-        .cpu_overrides = &.{
+        .model_overrides = &.{
             .{
                 .llvm_name = "bleeding-edge",
                 .omit = true,
@@ -1840,7 +1840,7 @@ const targets = [_]ArchTarget{
                 .omit = true,
             },
         },
-        .extra_cpus = &.{
+        .extra_models = &.{
             .{
                 .llvm_name = null,
                 .zig_name = "wasm_v1_0",
@@ -1951,7 +1951,7 @@ const targets = [_]ArchTarget{
                 .deps = &.{},
             },
         },
-        .cpu_overrides = &.{
+        .model_overrides = &.{
             .{
                 .llvm_name = "amdfam10",
                 .extra_deps = &.{"3dnowa"},
@@ -2291,7 +2291,7 @@ const targets = [_]ArchTarget{
                 .omit = true,
             },
         },
-        .extra_cpus = &.{
+        .extra_models = &.{
             .{
                 .llvm_name = null,
                 .zig_name = "i86",
@@ -2327,7 +2327,7 @@ const targets = [_]ArchTarget{
                 .deps = &.{"xs3"},
             },
         },
-        .cpu_overrides = &.{
+        .model_overrides = &.{
             .{
                 .llvm_name = "generic",
                 .omit = true,
@@ -2337,7 +2337,7 @@ const targets = [_]ArchTarget{
                 .omit = true,
             },
         },
-        .extra_cpus = &.{
+        .extra_models = &.{
             .{
                 .llvm_name = null,
                 .zig_name = "xs1b",
@@ -2449,7 +2449,7 @@ fn processOneTargetInner(io: Io, job: Job) !void {
 
     var features_table = std.StringHashMap(Feature).init(arena);
     var all_features = std.array_list.Managed(Feature).init(arena);
-    var all_cpus = std.array_list.Managed(Cpu).init(arena);
+    var all_models = std.array_list.Managed(Model).init(arena);
 
     if (target.llvm) |llvm| {
         const tblgen_progress = progress_node.start("running llvm-tblgen", 0);
@@ -2509,7 +2509,7 @@ fn processOneTargetInner(io: Io, job: Job) !void {
             llvm: []const u8,
             zig: []const u8,
         };
-        var cpu_aliases = std.StringHashMap(std.ArrayList(*Alias)).init(arena);
+        var model_aliases = std.StringHashMap(std.ArrayList(*Alias)).init(arena);
 
         {
             var it = root_map.iterator();
@@ -2523,7 +2523,7 @@ fn processOneTargetInner(io: Io, job: Job) !void {
                     const llvm_alias = kv.value_ptr.object.get("Name").?.string;
                     const llvm_name = kv.value_ptr.object.get("Alias").?.string;
 
-                    const gop = try cpu_aliases.getOrPut(try llvmNameToZigName(arena, llvm_name));
+                    const gop = try model_aliases.getOrPut(try llvmNameToZigName(arena, llvm_name));
 
                     if (!gop.found_existing) {
                         gop.value_ptr.* = .empty;
@@ -2634,16 +2634,16 @@ fn processOneTargetInner(io: Io, job: Job) !void {
                     var deps = std.array_list.Managed([]const u8).init(arena);
                     var omit_deps: []const []const u8 = &.{};
                     var extra_deps: []const []const u8 = &.{};
-                    const omitted = for (target.cpu_overrides) |cpu_override| {
-                        if (mem.eql(u8, llvm_name, cpu_override.llvm_name)) {
-                            if (cpu_override.omit) {
+                    const omitted = for (target.model_overrides) |model_override| {
+                        if (mem.eql(u8, llvm_name, model_override.llvm_name)) {
+                            if (model_override.omit) {
                                 break true;
                             }
-                            if (cpu_override.zig_name) |override_name| {
+                            if (model_override.zig_name) |override_name| {
                                 zig_name = override_name;
                             }
-                            omit_deps = cpu_override.omit_deps;
-                            extra_deps = cpu_override.extra_deps;
+                            omit_deps = model_override.omit_deps;
+                            extra_deps = model_override.extra_deps;
                             break false;
                         }
                     } else false;
@@ -2681,19 +2681,19 @@ fn processOneTargetInner(io: Io, job: Job) !void {
                         )) orelse continue;
                         try deps.append(feature_zig_name);
                     }
-                    try all_cpus.append(.{
+                    try all_models.append(.{
                         .llvm_name = llvm_name,
                         .zig_name = zig_name,
                         .features = deps.items,
                     });
 
-                    if (cpu_aliases.get(zig_name)) |aliases| {
+                    if (model_aliases.get(zig_name)) |aliases| {
                         alias_it: for (aliases.items) |alias| {
-                            for (target.cpu_overrides) |cpu_override| {
-                                if (mem.eql(u8, alias.llvm, cpu_override.llvm_name) and cpu_override.omit) continue :alias_it;
+                            for (target.model_overrides) |model_override| {
+                                if (mem.eql(u8, alias.llvm, model_override.llvm_name) and model_override.omit) continue :alias_it;
                             }
 
-                            try all_cpus.append(.{
+                            try all_models.append(.{
                                 .llvm_name = alias.llvm,
                                 .zig_name = alias.zig,
                                 .features = deps.items,
@@ -2711,11 +2711,11 @@ fn processOneTargetInner(io: Io, job: Job) !void {
         try features_table.put(extra_feature.zig_name, extra_feature);
         try all_features.append(extra_feature);
     }
-    for (target.extra_cpus) |extra_cpu| {
-        try all_cpus.append(extra_cpu);
+    for (target.extra_models) |extra_model| {
+        try all_models.append(extra_model);
     }
     mem.sort(Feature, all_features.items, {}, featureLessThan);
-    mem.sort(Cpu, all_cpus.items, {}, cpuLessThan);
+    mem.sort(Model, all_models.items, {}, modelLessThan);
 
     const render_progress = progress_node.start("rendering Zig code", 0);
 
@@ -2838,29 +2838,29 @@ fn processOneTargetInner(io: Io, job: Job) !void {
         \\pub const cpu = struct {
         \\
     );
-    for (all_cpus.items) |cpu| {
+    for (all_models.items) |model| {
         var deps_set = std.StringHashMap(void).init(arena);
-        for (cpu.features) |feature_zig_name| {
+        for (model.features) |feature_zig_name| {
             try putDep(&deps_set, features_table, feature_zig_name);
         }
         try pruneFeatures(arena, features_table, &deps_set);
-        var cpu_features = std.array_list.Managed([]const u8).init(arena);
+        var model_features = std.array_list.Managed([]const u8).init(arena);
         {
             var it = deps_set.keyIterator();
             while (it.next()) |key| {
-                try cpu_features.append(key.*);
+                try model_features.append(key.*);
             }
         }
-        mem.sort([]const u8, cpu_features.items, {}, asciiLessThan);
-        if (cpu.llvm_name) |llvm_name| {
+        mem.sort([]const u8, model_features.items, {}, asciiLessThan);
+        if (model.llvm_name) |llvm_name| {
             try w.print(
                 \\    pub const {f}: CpuModel = .{{
                 \\        .name = "{f}",
                 \\        .llvm_name = "{f}",
                 \\        .features = featureSet(&[_]Feature{{
             , .{
-                std.zig.fmtId(cpu.zig_name),
-                std.zig.fmtString(cpu.zig_name),
+                std.zig.fmtId(model.zig_name),
+                std.zig.fmtString(model.zig_name),
                 std.zig.fmtString(llvm_name),
             });
         } else {
@@ -2870,11 +2870,11 @@ fn processOneTargetInner(io: Io, job: Job) !void {
                 \\        .llvm_name = null,
                 \\        .features = featureSet(&[_]Feature{{
             , .{
-                std.zig.fmtId(cpu.zig_name),
-                std.zig.fmtString(cpu.zig_name),
+                std.zig.fmtId(model.zig_name),
+                std.zig.fmtString(model.zig_name),
             });
         }
-        if (cpu_features.items.len == 0) {
+        if (model_features.items.len == 0) {
             try w.writeAll(
                 \\}),
                 \\    };
@@ -2882,7 +2882,7 @@ fn processOneTargetInner(io: Io, job: Job) !void {
             );
         } else {
             try w.writeAll("\n");
-            for (cpu_features.items) |feature_zig_name| {
+            for (model_features.items) |feature_zig_name| {
                 try w.print("            .{f},\n", .{std.zig.fmtIdPU(feature_zig_name)});
             }
             try w.writeAll(
@@ -2920,7 +2920,7 @@ fn featureLessThan(_: void, a: Feature, b: Feature) bool {
     return std.ascii.lessThanIgnoreCase(a.zig_name, b.zig_name);
 }
 
-fn cpuLessThan(_: void, a: Cpu, b: Cpu) bool {
+fn modelLessThan(_: void, a: Model, b: Model) bool {
     return std.ascii.lessThanIgnoreCase(a.zig_name, b.zig_name);
 }
 
