@@ -1771,6 +1771,48 @@ const targets = [_]ArchTarget{
                 .deps = &.{"bulk_memory_opt"},
             },
         },
+        .extra_cpus = &.{
+            .{
+                .llvm_name = null,
+                .zig_name = "wasm_v1_0",
+                .features = &.{
+                    "mutable_globals",
+                },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "wasm_v2_0",
+                .features = &.{
+                    "multivalue",
+                    "mutable_globals",
+                    "nontrapping_fptoint",
+                    "reference_types",
+                    "sign_ext",
+                    "simd128",
+                },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "wasm_v3_0",
+                .features = &.{
+                    "atomics",
+                    "exception_handling",
+                    "extended_const",
+                    "fp16",
+                    "gc",
+                    "multimemory",
+                    "mutable_globals",
+                    "nontrapping_fptoint",
+                    "relaxed_simd",
+                    "sign_ext",
+                    "tail_call",
+                },
+            },
+        },
+        .omit_cpus = &.{
+            "bleeding-edge",
+            "generic",
+        },
     },
     .{
         .zig_name = "x86",

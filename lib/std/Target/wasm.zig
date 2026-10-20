@@ -159,37 +159,6 @@ pub const all_features = blk: {
 };
 
 pub const cpu = struct {
-    pub const bleeding_edge: CpuModel = .{
-        .name = "bleeding_edge",
-        .llvm_name = "bleeding-edge",
-        .features = featureSet(&[_]Feature{
-            .atomics,
-            .bulk_memory,
-            .exception_handling,
-            .extended_const,
-            .fp16,
-            .gc,
-            .multimemory,
-            .mutable_globals,
-            .nontrapping_fptoint,
-            .relaxed_simd,
-            .sign_ext,
-            .simd128,
-            .tail_call,
-        }),
-    };
-    pub const generic: CpuModel = .{
-        .name = "generic",
-        .llvm_name = "generic",
-        .features = featureSet(&[_]Feature{
-            .bulk_memory,
-            .multivalue,
-            .mutable_globals,
-            .nontrapping_fptoint,
-            .reference_types,
-            .sign_ext,
-        }),
-    };
     pub const lime1: CpuModel = .{
         .name = "lime1",
         .llvm_name = "lime1",
@@ -207,5 +176,41 @@ pub const cpu = struct {
         .name = "mvp",
         .llvm_name = "mvp",
         .features = featureSet(&[_]Feature{}),
+    };
+    pub const wasm_v1_0: CpuModel = .{
+        .name = "wasm_v1_0",
+        .llvm_name = null,
+        .features = featureSet(&[_]Feature{
+            .mutable_globals,
+        }),
+    };
+    pub const wasm_v2_0: CpuModel = .{
+        .name = "wasm_v2_0",
+        .llvm_name = null,
+        .features = featureSet(&[_]Feature{
+            .multivalue,
+            .mutable_globals,
+            .nontrapping_fptoint,
+            .reference_types,
+            .sign_ext,
+            .simd128,
+        }),
+    };
+    pub const wasm_v3_0: CpuModel = .{
+        .name = "wasm_v3_0",
+        .llvm_name = null,
+        .features = featureSet(&[_]Feature{
+            .atomics,
+            .exception_handling,
+            .extended_const,
+            .fp16,
+            .gc,
+            .multimemory,
+            .mutable_globals,
+            .nontrapping_fptoint,
+            .relaxed_simd,
+            .sign_ext,
+            .tail_call,
+        }),
     };
 };
