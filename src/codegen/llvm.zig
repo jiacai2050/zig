@@ -2982,13 +2982,13 @@ pub const Object = struct {
                     } else .normal;
 
                     const payload_ty = ty: {
-                        if (layout.most_aligned_field_size == layout.payload_size) {
-                            break :ty aligned_field_llvm_ty;
-                        }
                         const padding_len = if (layout.tag_size == 0)
                             layout.abi_size - layout.most_aligned_field_size
                         else
                             layout.payload_size - layout.most_aligned_field_size;
+                        if (padding_len == 0) {
+                            break :ty aligned_field_llvm_ty;
+                        }
                         break :ty try o.builder.structType(.@"packed", &.{
                             aligned_field_llvm_ty,
                             try o.builder.arrayType(padding_len, .i8),
@@ -3582,6 +3582,11 @@ pub const Object = struct {
                 const payload = if (un.tag != .none) p: {
                     const field_index = zcu.unionTagFieldIndex(union_obj, Value.fromInterned(un.tag)).?;
                     const field_ty = Type.fromInterned(union_obj.field_types.get(ip)[field_index]);
+                    const field_size = field_ty.abiSize(zcu);
+                    const padding_len = if (layout.tag_size == 0)
+                        layout.abi_size - field_size
+                    else
+                        layout.payload_size - field_size;
 
                     // Sometimes we must make an unnamed struct because LLVM does
                     // not support bitcasting our payload struct to the true union payload type.
@@ -3590,7 +3595,6 @@ pub const Object = struct {
                     need_unnamed = layout.most_aligned_field != field_index;
 
                     if (!field_ty.hasRuntimeBits(zcu)) {
-                        const padding_len = layout.payload_size;
                         break :p try o.builder.undefConst(try o.builder.arrayType(padding_len, .i8));
                     }
                     const payload = try o.lowerValue(un.val, repr);
@@ -3598,9 +3602,7 @@ pub const Object = struct {
                     if (payload_ty != union_ty.structFields(&o.builder)[
                         @intFromBool(layout.tag_size > 0 and layout.tag_align.compare(.gte, layout.payload_align))
                     ]) need_unnamed = true;
-                    const field_size = field_ty.abiSize(zcu);
-                    if (field_size == layout.payload_size) break :p payload;
-                    const padding_len = layout.payload_size - field_size;
+                    if (padding_len == 0) break :p payload;
                     const padding_ty = try o.builder.arrayType(padding_len, .i8);
                     break :p try o.builder.structConst(
                         try o.builder.structType(.@"packed", &.{ payload_ty, padding_ty }),
