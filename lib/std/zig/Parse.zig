@@ -1656,7 +1656,7 @@ const PrecClass = struct {
         break :b order;
     };
 
-    /// Uses the table from Zig-0.16.0
+    /// Uses the table from Zig-0.17.0
     ///   * / % *% *| ||
     ///   + - ++ +% -% +| -|
     ///   << >> <<|
@@ -1664,7 +1664,7 @@ const PrecClass = struct {
     ///   == != < > <= >=
     ///   and
     ///   or
-    const v0_16_precedence_ordering = b: {
+    const v0_17_precedence_ordering = b: {
         @setEvalBranchQuota(20_000);
 
         var order: PrecedenceArray = @splat(@splat(null));
@@ -1704,8 +1704,8 @@ const PrecClass = struct {
         return PrecClass.precedence_ordering[@backingInt(lhs.group)][@backingInt(rhs.group)];
     }
 
-    pub fn v0_16_cmp(lhs: PrecClass, rhs: PrecClass) Rel {
-        return PrecClass.v0_16_precedence_ordering[@backingInt(lhs.group)][@backingInt(rhs.group)].?;
+    pub fn v0_17_cmp(lhs: PrecClass, rhs: PrecClass) Rel {
+        return PrecClass.v0_17_precedence_ordering[@backingInt(lhs.group)][@backingInt(rhs.group)].?;
     }
 
     fn computeTransitiveOrdering(order: *PrecedenceArray) void {
@@ -1782,7 +1782,7 @@ fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_operator_token: 
         const rel = info.prec.cmp(min_exc_prec) orelse b: {
             const prev_op_tok_tag = p.tokenTag(prev_operator_token);
             const prev_op_info = operTable[@backingInt(prev_op_tok_tag)];
-            const v0_16_rel = prev_op_info.prec.v0_16_cmp(info.prec);
+            const v0_17_rel = prev_op_info.prec.v0_17_cmp(info.prec);
             try p.warnMsg(.{
                 .tag = .ambiguous_operator_precedence,
                 .is_note = false,
@@ -1796,7 +1796,7 @@ fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_operator_token: 
                 .is_note = true,
                 .token = prev_operator_token,
             });
-            if (v0_16_rel == .gt or v0_16_rel == .eq) {
+            if (v0_17_rel == .gt or v0_17_rel == .eq) {
                 try p.warnMsg(.{
                     .tag = .hint_operator_precedence_left,
                     .is_note = true,
@@ -1816,7 +1816,7 @@ fn parseExprPrecedence(p: *Parse, min_exc_prec: PrecClass, prev_operator_token: 
                 });
             }
             // Use the old precedence rules to construct the tree to ease automatic fixups
-            break :b info.prec.v0_16_cmp(min_exc_prec);
+            break :b info.prec.v0_17_cmp(min_exc_prec);
         };
 
         if (rel == .lt) {
