@@ -30670,6 +30670,7 @@ fn coerceTupleToArray(
     const inst_ty = sema.typeOf(inst);
     const inst_len = inst_ty.arrayLen(zcu);
     const dest_len = dest_ty.arrayLen(zcu);
+    const dest_len_including_sent = dest_ty.arrayLenIncludingSentinel(zcu);
 
     if (dest_len != inst_len) {
         const msg = msg: {
@@ -30682,7 +30683,7 @@ fn coerceTupleToArray(
         return sema.failWithOwnedErrorMsg(block, msg);
     }
 
-    const dest_elems = try sema.usizeCast(block, dest_ty_src, dest_len);
+    const dest_elems = try sema.usizeCast(block, dest_ty_src, dest_len_including_sent);
     const element_vals = try sema.arena.alloc(InternPool.Index, dest_elems);
     const element_refs = try sema.arena.alloc(Air.Inst.Ref, dest_elems);
     const dest_elem_ty = dest_ty.childType(zcu);

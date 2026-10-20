@@ -591,6 +591,9 @@ test "tuple to array handles sentinel" {
         var b: [3:0]u8 = a;
     };
     try expect(S.b[0] == 1);
+    try expect(S.b[1] == 2);
+    try expect(S.b[2] == 3);
+    try expect(S.b[3] == 0);
 }
 
 test "array init of container level array variable" {
