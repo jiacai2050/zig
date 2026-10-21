@@ -1387,10 +1387,9 @@ const SymbolReloc = struct {
             illegal_dynamic_section,
         },
 
-        /// ~~mystery bits~~
-        /// what will MLUGG use them for?
-        /// nobody knows
-        _: u11 = 0,
+        relaxation: Relaxation,
+
+        _: u10 = 0,
     },
     /// Forms a linked list of all symbol relocations with the same `target`. This list exists so
     /// that all relocations targeting a particular symbol can be re-applied if that symbol moves.
@@ -1438,6 +1437,19 @@ const SymbolReloc = struct {
             _pad: u30 = 0,
         },
     };
+
+    const Relaxation = enum(u1) {
+        none,
+    };
+    /// Updates `reloc.type` and `reloc.offset` as needed based on `reloc.bits.relaxation`. It is
+    /// possible that `reloc` is already relaxed, and may need to be un-relaxed due to a change in
+    /// the symbol definition.
+    fn processRelaxation(reloc: *SymbolReloc, elf: *Elf) void {
+        _ = elf;
+        switch (reloc.bits.relaxation) {
+            .none => return,
+        }
+    }
 
     /// Instead of using the ELF relocation enums, we have our own internal representation for
     /// relocation types. This representation is more compact (requiring only 16 bits), and allows
@@ -2332,7 +2344,8 @@ const SymbolReloc = struct {
         reloc.rela_index = .none;
     }
 
-    fn updateDynamicReloc(reloc: *SymbolReloc, elf: *Elf) Error!void {
+    /// Called when the classification of the target symbol changes.
+    fn updateDynamicReloc(reloc: *SymbolReloc, elf: *Elf, ri: SymbolReloc.Index) Error!void {
         assert(elf.ehdrType() != .REL);
         const reloc_node = reloc.node.unwrap().?; // deleted
 
@@ -2349,6 +2362,30 @@ const SymbolReloc = struct {
                 elf.illegal_dynamic_section_reloc_count -= 1;
                 reloc.bits.result = .ok;
             },
+        }
+
+        {
+            const gpa = elf.base.comp.gpa;
+
+            const old_depends_on_got_address = reloc.bits.type.dependsOnGotAddress();
+            const old_depends_on_tls_size = reloc.bits.type.dependsOnTlsSize(elf);
+
+            reloc.processRelaxation(elf);
+
+            const new_depends_on_got_address = reloc.bits.type.dependsOnGotAddress();
+            const new_depends_on_tls_size = reloc.bits.type.dependsOnTlsSize(elf);
+
+            if (old_depends_on_got_address and !new_depends_on_got_address) {
+                assert(elf.got_relocs.swapRemove(ri));
+            } else if (!old_depends_on_got_address and new_depends_on_got_address) {
+                try elf.got_relocs.putNoClobber(gpa, ri, {});
+            }
+
+            if (old_depends_on_tls_size and !new_depends_on_tls_size) {
+                assert(elf.tls_size_symbol_relocs.swapRemove(ri));
+            } else if (!old_depends_on_tls_size and new_depends_on_tls_size) {
+                try elf.tls_size_symbol_relocs.putNoClobber(gpa, ri, {});
+            }
         }
 
         assert(reloc.rela_index == .none);
@@ -4345,7 +4382,7 @@ const Symbol = struct {
                 while (ri != .none) {
                     const reloc = ri.get(elf);
                     assert(reloc.target_symbol == sym_id);
-                    try reloc.updateDynamicReloc(elf);
+                    try reloc.updateDynamicReloc(elf, ri);
                     ri = reloc.next;
                 }
 
@@ -10000,6 +10037,7 @@ fn addSymbolRelocAssumeCapacityInner(
         .bits = .{
             .type = @"type",
             .result = .ok,
+            .relaxation = .none,
         },
         .next = next,
         .prev = .none,
@@ -10011,7 +10049,7 @@ fn addSymbolRelocAssumeCapacityInner(
     if (@"type".dependsOnGotAddress()) {
         try elf.got_relocs.put(gpa, ri, {});
     }
-    try ri.get(elf).updateDynamicReloc(elf);
+    try ri.get(elf).updateDynamicReloc(elf, ri);
 
     // Actually apply the new relocation!
     ri.get(elf).apply(elf);
