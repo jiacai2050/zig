@@ -1802,15 +1802,15 @@ test "put and remove loop in random order" {
     var map = AutoHashMap(u32, u32).init(std.testing.allocator);
     defer map.deinit();
 
-    var keys = std.array_list.Managed(u32).init(std.testing.allocator);
-    defer keys.deinit();
+    var keys: std.ArrayList(u32) = .empty;
+    defer keys.deinit(std.testing.allocator);
 
     const size = 32;
     const iterations = 100;
 
     var i: u32 = 0;
     while (i < size) : (i += 1) {
-        try keys.append(i);
+        try keys.append(std.testing.allocator, i);
     }
     var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
     const random = prng.random();
@@ -1836,12 +1836,12 @@ test "remove many elements in random order" {
     var map = Map.init(std.heap.page_allocator);
     defer map.deinit();
 
-    var keys = std.array_list.Managed(u32).init(std.heap.page_allocator);
-    defer keys.deinit();
+    var keys: std.ArrayList(u32) = .empty;
+    defer keys.deinit(std.heap.page_allocator);
 
     var i: u32 = 0;
     while (i < n) : (i += 1) {
-        keys.append(i) catch unreachable;
+        keys.append(std.heap.page_allocator, i) catch unreachable;
     }
 
     var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
