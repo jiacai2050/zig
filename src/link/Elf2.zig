@@ -4963,31 +4963,20 @@ fn stringExisting(elf: *Elf, comptime section: StringSection, key: []const u8) S
 }
 
 const StringTable = struct {
-    map: std.HashMapUnmanaged(u32, void, StringTable.Context, std.hash_map.default_max_load_percentage),
-
-    const Context = struct {
-        slice: []const u8,
-
-        pub fn eql(_: Context, lhs_key: u32, rhs_key: u32) bool {
-            return lhs_key == rhs_key;
-        }
-
-        pub fn hash(ctx: Context, key: u32) u64 {
-            return std.hash_map.hashString(std.mem.sliceTo(ctx.slice[key..], 0));
-        }
-    };
+    map: std.array_hash_map.Custom(u32, void, void, true),
 
     const Adapter = struct {
         slice: []const u8,
 
-        pub fn eql(adapter: Adapter, lhs_key: []const u8, rhs_key: u32) bool {
+        pub fn eql(adapter: Adapter, lhs_key: []const u8, rhs_key: u32, rhs_index: usize) bool {
+            _ = rhs_index;
             return std.mem.startsWith(u8, adapter.slice[rhs_key..], lhs_key) and
                 adapter.slice[rhs_key + lhs_key.len] == 0;
         }
 
-        pub fn hash(_: Adapter, key: []const u8) u64 {
+        pub fn hash(_: Adapter, key: []const u8) u32 {
             assert(std.mem.findScalar(u8, key, 0) == null);
-            return std.hash_map.hashString(key);
+            return std.array_hash_map.hashString(key);
         }
     };
 
@@ -5001,8 +4990,7 @@ const StringTable = struct {
     fn ensureAdditionalCapacity(st: *StringTable, elf: *Elf, shndx: Section.Index, string_len: usize) Error!void {
         const gpa = elf.base.comp.gpa;
         const ni = shndx.node(elf);
-        const slice_const = ni.sliceConst(&elf.mf);
-        try st.map.ensureUnusedCapacityContext(gpa, 1, .{ .slice = slice_const });
+        try st.map.ensureUnusedCapacity(gpa, 1);
         const size: u64 = switch (elf.shdrPtr(shndx)) {
             inline else => |shdr| elf.targetLoad(&shdr.size),
         };
