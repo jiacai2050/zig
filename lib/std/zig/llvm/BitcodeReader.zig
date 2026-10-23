@@ -228,7 +228,7 @@ fn nextRecord(bc: *BitcodeReader) !?Record {
                                 @fromBackingInt(@intCast(try bc.readFixed(u3, 3)));
                             try operands.append(record_arena.allocator(), @backingInt(encoding));
                             switch (encoding) {
-                                .fixed, .vbr => try operands.append(try bc.readVbr(u7, 5)),
+                                .fixed, .vbr => try operands.append(record_arena.allocator(), try bc.readVbr(u7, 5)),
                                 .array, .char6, .blob => {},
                                 _ => return error.UnsuportedAbbrevEncoding,
                             }

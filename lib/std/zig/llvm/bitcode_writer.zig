@@ -38,7 +38,7 @@ pub fn BitcodeWriter(comptime types: []const type) type {
             };
         }
 
-        pub fn deinit(self: BcWriter) void {
+        pub fn deinit(self: *BcWriter) void {
             self.buffer.deinit(self.allocator);
         }
 
@@ -145,7 +145,7 @@ pub fn BitcodeWriter(comptime types: []const type) type {
 
         pub fn writeBlob(self: *BcWriter, blob: []const u8) Error!void {
             const blob_word_size = std.mem.alignForward(usize, blob.len, 4);
-            try self.buffer.ensureUnusedCapacity(blob_word_size + 1);
+            try self.buffer.ensureUnusedCapacity(self.allocator, blob_word_size + 1);
             self.alignTo32() catch unreachable;
 
             const slice = self.buffer.addManyAsSliceAssumeCapacity(blob_word_size / 4);
@@ -157,7 +157,7 @@ pub fn BitcodeWriter(comptime types: []const type) type {
         pub fn alignTo32(self: *BcWriter) Error!void {
             if (self.bit_count == 0) return;
 
-            try self.buffer.append(std.mem.nativeToLittle(u32, self.bit_buffer));
+            try self.buffer.append(self.allocator, std.mem.nativeToLittle(u32, self.bit_buffer));
             self.bit_buffer = 0;
             self.bit_count = 0;
         }
