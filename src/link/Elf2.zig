@@ -8100,11 +8100,15 @@ fn loadObject(
                     if (opts.node_fixed) ni: {
                         const shndx_ni = opts.shndx.node(elf);
                         const after_oni: MappedFile.Node.Index.Optional = after: {
-                            const last_ni = shndx_ni.last(&elf.mf).unwrap() orelse break :after .none;
-                            break :after switch (last_ni.position(&elf.mf)) {
-                                .header => .wrap(last_ni),
-                                .footer, .floating => .none,
-                            };
+                            var node_it = shndx_ni.last(&elf.mf);
+                            while (node_it.unwrap()) |cur_ni| {
+                                switch (cur_ni.position(&elf.mf)) {
+                                    .header => break :after .wrap(cur_ni), // last header
+                                    .footer, .floating => node_it = cur_ni.prev(&elf.mf),
+                                }
+                            } else {
+                                break :after .none;
+                            }
                         };
                         break :ni try shndx_ni.addHeaderChildAfter(gpa, &elf.mf, after_oni, add_node_opts);
                     } else try opts.shndx.node(elf).addFloatingChild(gpa, &elf.mf, add_node_opts),
