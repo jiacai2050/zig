@@ -21,6 +21,15 @@ const Alignment = MappedFile.Alignment;
 base: link.File,
 options: link.File.OpenOptions,
 mf: MappedFile,
+
+/// These fields could simply be read from the ehdr node when needed, but it turns out that they are
+/// accessed frequently enough that we see measurable performance gains from caching them here.
+ehdr_fields: struct {
+    class: std.elf.CLASS,
+    type: EhdrType,
+    machine: EhdrMachine,
+},
+
 ni: struct {
     elf: MappedFile.Node.Index,
     ehdr: MappedFile.Node.Index,
@@ -5115,6 +5124,11 @@ fn create(
         },
         .options = options,
         .mf = try .init(file, comp.gpa, io),
+        .ehdr_fields = .{
+            .class = class,
+            .type = @"type",
+            .machine = machine,
+        },
         .ni = .{
             .elf = undefined,
             .ehdr = undefined,
@@ -7007,7 +7021,9 @@ fn flushMovedNodeRelocs(
 }
 
 fn identClass(elf: *const Elf) std.elf.CLASS {
-    return @fromBackingInt(elf.ni.elf.sliceConst(&elf.mf)[std.elf.EI.CLASS]);
+    // We used to get this value from `elf.ni.ehdr`, but it turns out this function is called often
+    // enough to see measurable performance gains from memoizing its result on `Elf`.
+    return elf.ehdr_fields.class;
 }
 
 /// Like `std.elf.ET`, but only includes the ELF machine architectures we support, so that we can
@@ -7039,24 +7055,14 @@ const EhdrType = enum(u16) {
     }
 };
 fn ehdrMachine(elf: *const Elf) EhdrMachine {
-    const ehdr_slice = elf.ni.ehdr.sliceConst(&elf.mf);
-    switch (elf.identClass()) {
-        .NONE, _ => unreachable,
-        inline else => |class| {
-            const ehdr: *const class.ElfN().Ehdr = @ptrCast(@alignCast(ehdr_slice));
-            return @bitCast(elf.targetLoad(&ehdr.machine));
-        },
-    }
+    // We used to get this value from `elf.ni.ehdr`, but it turns out this function is called often
+    // enough to see measurable performance gains from memoizing its result on `Elf`.
+    return elf.ehdr_fields.machine;
 }
 fn ehdrType(elf: *const Elf) EhdrType {
-    const ehdr_slice = elf.ni.ehdr.sliceConst(&elf.mf);
-    switch (elf.identClass()) {
-        .NONE, _ => unreachable,
-        inline else => |class| {
-            const ehdr: *const class.ElfN().Ehdr = @ptrCast(@alignCast(ehdr_slice));
-            return @bitCast(elf.targetLoad(&ehdr.type));
-        },
-    }
+    // We used to get this value from `elf.ni.ehdr`, but it turns out this function is called often
+    // enough to see measurable performance gains from memoizing its result on `Elf`.
+    return elf.ehdr_fields.type;
 }
 
 fn baseLoadableSegmentVAddr(elf: *const Elf) u64 {
@@ -7279,11 +7285,17 @@ const SymPtr = union(std.elf.CLASS) {
     @"32": *std.elf.Elf32.Sym,
     @"64": *std.elf.Elf64.Sym,
 };
-fn symPtr(elf: *Elf, index: Symbol.Index) SymPtr {
+/// This function is marked as `inline` because performance measurements (specifically, using this
+/// linker to link the Zig compiler against a static build of LLVM 23) show a measurable performance
+/// improvement from doing so---it seems that this is one of the hottest functions in this linker!
+inline fn symPtr(elf: *Elf, index: Symbol.Index) SymPtr {
     const raw_slice = Section.Index.symtab.node(elf).slice(&elf.mf);
-    switch (elf.shdrPtr(.symtab)) {
-        inline else => |shdr, class| {
-            const size = elf.targetLoad(&shdr.size);
+    // Avoid calling `shdrPtr` here: this function is extremely hot, so having to locate the shdr
+    // actually noticably affects performance!
+    switch (elf.identClass()) {
+        .NONE, _ => unreachable,
+        inline else => |class| {
+            const size = elf.symtab.items.len * @sizeOf(class.ElfN().Sym);
             const slice: []class.ElfN().Sym = @ptrCast(@alignCast(raw_slice[0..@intCast(size)]));
             return @unionInit(SymPtr, @tagName(class), &slice[@backingInt(index)]);
         },
