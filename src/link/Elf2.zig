@@ -2349,6 +2349,9 @@ const SymbolReloc = struct {
         assert(elf.ehdrType() != .REL);
         const reloc_node = reloc.node.unwrap().?; // deleted
 
+        const trace = tracy.trace(@src());
+        defer trace.end();
+
         // Delete any current output relocation or error.
         switch (reloc.bits.result) {
             .ok, .overflowed, .misaligned => {
@@ -3086,6 +3089,10 @@ const AddLocalSymbolOptions = struct {
 fn addLocalSymbol(elf: *Elf, opts: AddLocalSymbolOptions) Error!Symbol.LocalIndex {
     const gpa = elf.base.comp.gpa;
 
+    const trace = tracy.trace(@src());
+    defer trace.end();
+    trace.addText(opts.name);
+
     assert(opts.shndx != .UNDEF);
 
     try elf.symtab.ensureUnusedCapacity(gpa, 1);
@@ -3161,6 +3168,10 @@ fn addGlobalSymbol(elf: *Elf, opts: Symbol.Global.AddOptions) (error{
     UndefinedDefaultVersion,
 } || Error)!Symbol.Global.Index {
     _ = opts.lib_name; // TODO
+
+    const trace = tracy.trace(@src());
+    defer trace.end();
+    trace.addText(opts.name);
 
     log.debug("addGlobalSymbol({q})", .{opts.name});
 
@@ -4347,6 +4358,9 @@ const Symbol = struct {
             /// Returns `true` if any relocations were updated, in which case relocations targeting
             /// `gsi` must be re-applied by the caller.
             fn updateDynamicTargetRelocs(gsi: Symbol.Global.Index, elf: *Elf) Error!bool {
+                const trace = tracy.trace(@src());
+                defer trace.end();
+
                 if (elf.shndx.dynamic == .UNDEF) return false;
                 const sym_id: Symbol.Id = .global(gsi);
 
@@ -4517,19 +4531,7 @@ const Symbol = struct {
         }
 
         fn flushMoved(sym_id: Symbol.Id, elf: *Elf, new_value: u64) void {
-            const trace = tracy.trace(@src());
-            defer trace.end();
-
             const sym_index = sym_id.index(elf);
-
-            trace.addText(name: {
-                // There isn't a general `name` method on `Symbol.Id` because it would be incorrect
-                // to ever actually care about the name of a local symbol.
-                const name: String(.strtab) = switch (elf.symPtr(sym_index)) {
-                    inline else => |sym| @fromBackingInt(elf.targetLoad(&sym.name)),
-                };
-                break :name name.slice(elf);
-            });
 
             switch (elf.symPtr(sym_index)) {
                 inline else => |sym| elf.targetStore(&sym.value, @intCast(new_value)),
@@ -4555,6 +4557,9 @@ const Symbol = struct {
         }
 
         fn applyTargetRelocs(sym_id: Symbol.Id, elf: *Elf) void {
+            const trace = tracy.trace(@src());
+            defer trace.end();
+
             var ri = sym_id.index(elf).ptr(elf).first_target_reloc;
             while (ri != .none) {
                 const reloc = ri.get(elf);
@@ -7709,6 +7714,10 @@ fn loadInputInner(elf: *Elf, input: link.Input) (Error || error{BadMagic})!void 
     }
 }
 fn loadArchive(elf: *Elf, path: std.Build.Cache.Path, fr: *Io.File.Reader) (LoadParseInputError || error{BadMagic})!void {
+    const trace = tracy.trace(@src());
+    defer trace.end();
+    trace.addTextFmt("{f}", .{path.fmtEscapeString()});
+
     const comp = elf.base.comp;
     const gpa = comp.gpa;
     const diags = &comp.link_diags;
@@ -7788,6 +7797,10 @@ fn loadObject(
     fr: *Io.File.Reader,
     fl: MappedFile.Node.FileLocation,
 ) LoadParseInputError!void {
+    const trace = tracy.trace(@src());
+    defer trace.end();
+    trace.addTextFmt("{f}{f}", .{ path.fmtEscapeString(), fmtMemberString(member) });
+
     const comp = elf.base.comp;
     const gpa = comp.gpa;
     const diags = &comp.link_diags;
@@ -7939,443 +7952,492 @@ fn loadObject(
             defer gpa.free(shstrtab);
             try elf.nodes.ensureUnusedCapacity(gpa, ehdr.shnum - 1);
             try elf.input_sections.ensureUnusedCapacity(gpa, ehdr.shnum - 1);
-            for (sections[1..]) |*section| {
-                if (section.shdr.name >= shstrtab.len) continue;
-                const name = std.mem.sliceTo(shstrtab[section.shdr.name..], 0);
-                if (!comp.config.any_unwind_tables and std.mem.eql(u8, name, ".eh_frame")) continue;
-                const sect_type = section.shdr.type;
-                const opts: struct {
-                    shndx: Section.Index,
-                    node_fixed: bool,
-                } = switch (sect_type) {
-                    else => continue,
-                    .PROGBITS, .NOBITS, .X86_64_UNWIND => opts: {
-                        const shndx = elf.mapInputSection(.{
-                            .name = name,
-                            .flags = section.shdr.flags.shf,
-                            .entsize = section.shdr.entsize,
-                            .type = section.shdr.type,
-                        }) catch |err| switch (err) {
-                            else => |e| return e,
-                            error.StripSection => continue,
-                            error.TlsSectionUnavailable => {
-                                if (section.shdr.size == 0) continue;
 
-                                return diags.failParse(
-                                    path,
-                                    "thread-local storage section '{s}' is incompatible with '-fsingle-threaded'",
-                                    .{name},
-                                );
-                            },
-                            error.UnsupportedSectionFlags => if (!section.shdr.flags.shf.ALLOC) {
-                                // It probably doesn't matter, just skip this section.
-                                continue;
-                            } else return diags.failParse(
-                                path,
-                                "unsupported flags for section '{s}'",
-                                .{name},
-                            ),
-                            error.SectionTypeConflict => if (!section.shdr.flags.shf.ALLOC) {
-                                // It probably doesn't matter, just skip this section.
-                                continue;
-                            } else return diags.failParse(
-                                path,
-                                "type of section '{s}' conflicts with other inputs",
-                                .{name},
-                            ),
-                            error.SectionFlagsConflict => if (!section.shdr.flags.shf.ALLOC) {
-                                // It probably doesn't matter, just skip this section.
-                                continue;
-                            } else return diags.failParse(
-                                path,
-                                "flags of section '{s}' conflict with other inputs",
-                                .{name},
-                            ),
-                            error.UnsupportedNobitsSection => return diags.failParse(
-                                path,
-                                "unsupported section type SHT_NOBITS for non-bss section '{s}'",
-                                .{name},
-                            ),
-                        };
-                        if (section.shdr.flags.shf.COMPRESSED) {
-                            // SHF_COMPRESSED is only allowed on non-alloc sections.
-                            if (section.shdr.flags.shf.ALLOC) return diags.failParse(
-                                path,
-                                "section '{s}' has conflicting flags SHF_ALLOC and SHF_COMPRESSED",
-                                .{name},
-                            );
-                            // TODO: handle compressed input sections. We'll need to set a flag to
-                            // indicate that `flushInputSection` needs to decompress the section.
-                            // But because this section isn't SHF_ALLOC, it's probably okay to just
-                            // skip it for now.
-                            continue;
-                        }
-                        break :opts .{
-                            .shndx = shndx,
-                            // For well-known sections, we know that it's fine to have e.g. random
-                            // padding, so there's no need to make the sections fixed. For custom
-                            // sections, however, we do want fixed nodes to avoid padding.
-                            .node_fixed = shndx != .text and
-                                shndx != .rodata and
-                                shndx != .data and
-                                shndx != .data_rel_ro and
-                                shndx != elf.shndx.tdata,
-                        };
-                    },
-                    inline .INIT_ARRAY, .FINI_ARRAY, .PREINIT_ARRAY => |@"type"| .{
-                        .shndx = shndx: {
-                            // TODO: the input section name may include a "priority" value between 1
-                            // and 65535 which should affect the order we assemble input sections in
-                            const init_fini_section_name: []const u8 = switch (@"type") {
-                                .INIT_ARRAY => "init_array",
-                                .FINI_ARRAY => "fini_array",
-                                .PREINIT_ARRAY => "preinit_array",
-                                else => comptime unreachable,
-                            };
-                            const shndx: *Section.Index = &@field(elf.shndx, init_fini_section_name);
-                            const need_addralign: u8 = switch (class) {
-                                .NONE, _ => unreachable,
-                                .@"32" => 4,
-                                .@"64" => 8,
-                            };
-                            if (section.shdr.addralign != need_addralign) {
-                                return diags.failParse(path, "bad addralign on {t} shdr", .{@"type"});
-                            }
-                            if (shndx.* == .UNDEF) {
-                                try elf.createInitFiniArraySection(shndx, init_fini_section_name, @"type");
-                            }
-                            switch (elf.shdrPtr(shndx.*)) {
-                                inline else => |shdr| {
-                                    const old_size = elf.targetLoad(&shdr.size);
-                                    const new_size = old_size + section.shdr.size;
-                                    elf.targetStore(&shdr.size, @intCast(new_size));
-                                    elf.updateInitFiniArraySectionSize(shndx.*, init_fini_section_name);
+            {
+                const sections_trace = tracy.traceNamed(@src(), "scan input sections");
+                defer sections_trace.end();
+                for (sections[1..]) |*section| {
+                    const section_trace = tracy.traceNamed(@src(), "input section");
+                    defer section_trace.end();
+                    if (section.shdr.name >= shstrtab.len) continue;
+                    const name = std.mem.sliceTo(shstrtab[section.shdr.name..], 0);
+                    section_trace.addText(name);
+                    if (!comp.config.any_unwind_tables and std.mem.eql(u8, name, ".eh_frame")) continue;
+                    const sect_type = section.shdr.type;
+                    const opts: struct {
+                        shndx: Section.Index,
+                        node_fixed: bool,
+                    } = switch (sect_type) {
+                        else => continue,
+                        .PROGBITS, .NOBITS, .X86_64_UNWIND => opts: {
+                            const shndx = elf.mapInputSection(.{
+                                .name = name,
+                                .flags = section.shdr.flags.shf,
+                                .entsize = section.shdr.entsize,
+                                .type = section.shdr.type,
+                            }) catch |err| switch (err) {
+                                else => |e| return e,
+                                error.StripSection => continue,
+                                error.TlsSectionUnavailable => {
+                                    if (section.shdr.size == 0) continue;
+
+                                    return diags.failParse(
+                                        path,
+                                        "thread-local storage section '{s}' is incompatible with '-fsingle-threaded'",
+                                        .{name},
+                                    );
                                 },
-                            }
-                            break :shndx shndx.*;
-                        },
-                        // This node must be fixed to prevent padding from being added between different
-                        // INIT_ARRAY/FINI_ARRAY/PREINIT_ARRAY input sections.
-                        .node_fixed = true,
-                    },
-                };
-                const need_align: Alignment = .fromByteUnits(
-                    std.math.ceilPowerOfTwoAssert(usize, @intCast(@max(section.shdr.addralign, 1))),
-                );
-
-                try opts.shndx.ensureAligned(elf, need_align);
-
-                if (sect_type == .NOBITS) {
-                    const offset: u64 = switch (elf.shdrPtr(opts.shndx)) {
-                        inline else => |shdr| offset: {
-                            // Bump our BSS output section size
-                            const old_size: u64 = elf.targetLoad(&shdr.size);
-                            const offset = need_align.forward(old_size);
-                            elf.targetStore(&shdr.size, @intCast(offset + section.shdr.size));
-                            break :offset offset;
-                        },
-                    };
-
-                    section.placement = .{ .nobits = .{
-                        .shndx = opts.shndx,
-                        .offset = offset,
-                    } };
-                    if (opts.shndx == elf.shndx.bss) {
-                        input_has_bss = true;
-                    } else if (opts.shndx == elf.shndx.tbss) {
-                        input_has_tbss = true;
-                    } else {
-                        assert(elf.ehdrType() == .REL);
-                    }
-
-                    continue;
-                }
-
-                const add_node_opts: MappedFile.Node.AddOptions = .{
-                    .size = need_align.forward(section.shdr.size),
-                    .alignment = need_align,
-                    .moved = true, // see assert at end of `flushInputSection`
-                };
-                const ni = elf.addNodeAssumeCapacity(
-                    if (opts.node_fixed) ni: {
-                        const shndx_ni = opts.shndx.node(elf);
-                        const after_oni: MappedFile.Node.Index.Optional = after: {
-                            var node_it = shndx_ni.last(&elf.mf);
-                            while (node_it.unwrap()) |cur_ni| {
-                                switch (cur_ni.position(&elf.mf)) {
-                                    .header => break :after .wrap(cur_ni), // last header
-                                    .footer, .floating => node_it = cur_ni.prev(&elf.mf),
-                                }
-                            } else {
-                                break :after .none;
-                            }
-                        };
-                        break :ni try shndx_ni.addHeaderChildAfter(gpa, &elf.mf, after_oni, add_node_opts);
-                    } else try opts.shndx.node(elf).addFloatingChild(gpa, &elf.mf, add_node_opts),
-                    .{ .input_section = @fromBackingInt(@intCast(elf.input_sections.items.len)) },
-                );
-                section.placement = .{ .progbits = @fromBackingInt(@intCast(elf.input_sections.items.len)) };
-                elf.input_sections.addOneAssumeCapacity().* = .{
-                    .input = input_index,
-                    .file_location = .{
-                        .offset = fl.offset + section.shdr.offset,
-                        .size = if (section.shdr.type == .NOBITS) 0 else section.shdr.size,
-                    },
-                    // The section vaddr is initially 0, because the symbol addresses are
-                    // zero-based. This will eventually be updated by `flushMoved`.
-                    .vaddr = 0,
-                    .node = ni,
-                    .first_symbol_reloc = .none,
-                };
-                elf.input_prog_node.increaseEstimatedTotalItems(1);
-            }
-            var symmap: std.ArrayList(Symbol.Id) = .empty;
-            defer symmap.deinit(gpa);
-            for (sections[1..], 1..) |*symtab, symtab_shndx| switch (symtab.shdr.type) {
-                else => {},
-                .SYMTAB => {
-                    if (symtab.shdr.entsize < @sizeOf(ElfN.Sym))
-                        return diags.failParse(path, "unsupported symtab entsize", .{});
-                    const strtab = strtab: {
-                        if (symtab.shdr.link == std.elf.SHN_UNDEF or symtab.shdr.link >= ehdr.shnum)
-                            return diags.failParse(path, "missing symbol names", .{});
-                        const shdr = &sections[symtab.shdr.link].shdr;
-                        if (shdr.type != .STRTAB)
-                            return diags.failParse(path, "invalid strtab type", .{});
-                        const strtab = try gpa.alloc(u8, @intCast(shdr.size));
-                        errdefer gpa.free(strtab);
-                        try fr.seekTo(fl.offset + shdr.offset);
-                        try r.readSliceAll(strtab);
-                        break :strtab strtab;
-                    };
-                    defer gpa.free(strtab);
-                    const symnum = std.math.sub(u32, std.math.divExact(
-                        u32,
-                        @intCast(symtab.shdr.size),
-                        @intCast(symtab.shdr.entsize),
-                    ) catch return diags.failParse(
-                        path,
-                        "symtab section size (0x{x}) is not a multiple of entsize (0x{x})",
-                        .{ symtab.shdr.size, symtab.shdr.entsize },
-                    ), 1) catch continue;
-                    symmap.clearRetainingCapacity();
-                    try symmap.resize(gpa, symnum);
-                    try fr.seekTo(fl.offset + symtab.shdr.offset + symtab.shdr.entsize);
-                    for (symmap.items) |*si| {
-                        si.* = .null;
-                        const input_sym = try r.peekStruct(ElfN.Sym, target_endian);
-                        try r.discardAll64(symtab.shdr.entsize);
-                        if (input_sym.name >= strtab.len or input_sym.shndx >= ehdr.shnum) continue;
-
-                        const name = std.mem.sliceTo(strtab[input_sym.name..], 0);
-
-                        const sym_type: std.elf.STT = switch (input_sym.info.type) {
-                            .NOTYPE, .OBJECT, .FUNC, .TLS => |t| t,
-                            .SECTION => .NOTYPE,
-                            .FILE, .COMMON, _ => continue,
-                        };
-
-                        if (input_sym.shndx == std.elf.SHN_UNDEF) switch (input_sym.info.bind) {
-                            else => |bind| return diags.failParse(
-                                path,
-                                "symbol '{s}' has unsupported binding (0x{x})",
-                                .{ name, bind },
-                            ),
-                            .LOCAL => continue,
-                            .GLOBAL, .WEAK, .GNU_UNIQUE => |bind| {
-                                si.* = .global(elf.addGlobalSymbol(.{
-                                    .node = .none,
-                                    .name = name,
-                                    .value = input_sym.value,
-                                    .size = input_sym.size,
-                                    .type = sym_type,
-                                    .bind = switch (bind) {
-                                        .WEAK, .GNU_UNIQUE => .weak,
-                                        .GLOBAL => .strong,
-                                        else => unreachable,
-                                    },
-                                    .visibility = input_sym.other.visibility,
-                                    .shndx = .UNDEF,
-                                }) catch |err| switch (err) {
-                                    error.MultipleDefinitions => unreachable, // shndx is .UNDEF
-                                    error.MultipleDefaultVersions => unreachable, // shndx is .UNDEF
-                                    error.UndefinedDefaultVersion => return diags.failParse(
-                                        path,
-                                        "symbol '{s}' specifies default version without defining it",
-                                        .{name},
-                                    ),
-                                    else => |e| return e,
-                                });
-                                continue;
-                            },
-                        };
-
-                        const symbol_oni: MappedFile.Node.Index.Optional, const output_shndx: Section.Index, const symbol_value: u64 = switch (sections[input_sym.shndx].placement) {
-                            .none => continue,
-                            .progbits => |isi| .{
-                                .wrap(isi.node(elf)),
-                                elf.getNodeShndx(isi.node(elf)),
-                                input_sym.value,
-                            },
-                            .nobits => |nobits| sym: {
-                                const section_base: u64 = switch (elf.ehdrType()) {
-                                    .REL => 0,
-                                    .EXEC, .DYN => base: {
-                                        if (elf.ni.tls != .none and
-                                            nobits.shndx == elf.shndx.tbss)
-                                        {
-                                            break :base elf.tbssOffset();
-                                        }
-                                        assert(nobits.shndx == elf.shndx.bss);
-                                        break :base nobits.shndx.vaddr(elf);
-                                    },
-                                };
-                                break :sym .{
-                                    .none,
-                                    nobits.shndx,
-                                    section_base + nobits.offset + input_sym.value,
-                                };
-                            },
-                        };
-
-                        switch (input_sym.info.bind) {
-                            else => |bind| return diags.failParse(
-                                path,
-                                "symbol '{s}' has unsupported binding (0x{x})",
-                                .{ name, bind },
-                            ),
-                            .LOCAL => {
-                                const lsi = try elf.addLocalSymbol(.{
-                                    .node = symbol_oni,
-                                    .name = name,
-                                    .value = symbol_value,
-                                    .size = input_sym.size,
-                                    .type = sym_type,
-                                    .shndx = output_shndx,
-                                });
-                                si.* = .local(lsi);
-                            },
-                            .GLOBAL, .WEAK, .GNU_UNIQUE => |bind| {
-                                si.* = .global(elf.addGlobalSymbol(.{
-                                    .node = symbol_oni,
-                                    .name = name,
-                                    .value = symbol_value,
-                                    .size = input_sym.size,
-                                    .type = sym_type,
-                                    .bind = switch (bind) {
-                                        .WEAK, .GNU_UNIQUE => .weak,
-                                        .GLOBAL => .strong,
-                                        else => unreachable,
-                                    },
-                                    .visibility = input_sym.other.visibility,
-                                    .shndx = output_shndx,
-                                }) catch |err| switch (err) {
-                                    error.MultipleDefinitions => return diags.failParse(
-                                        path,
-                                        "multiple definitions of '{s}'",
-                                        .{name},
-                                    ),
-                                    error.MultipleDefaultVersions => return diags.failParse(
-                                        path,
-                                        "multiple default versions of '{s}'",
-                                        .{parseVersionedSymbolName(name).name},
-                                    ),
-                                    error.UndefinedDefaultVersion => unreachable, // shndx is not `.UNDEF` (i.e. the symbol is defined)
-                                    else => |e| return e,
-                                });
-                            },
-                        }
-                    }
-                    for (sections[1..]) |*rel_sec| switch (rel_sec.shdr.type) {
-                        else => {},
-                        inline .REL, .RELA => |sht| {
-                            if (rel_sec.shdr.link != symtab_shndx or rel_sec.shdr.info == std.elf.SHN_UNDEF or
-                                rel_sec.shdr.info >= ehdr.shnum) continue;
-                            const Rel = switch (sht) {
-                                else => comptime unreachable,
-                                .REL => ElfN.Rel,
-                                .RELA => ElfN.Rela,
-                            };
-                            if (rel_sec.shdr.entsize < @sizeOf(Rel))
-                                return diags.failParse(path, "unsupported rel entsize", .{});
-
-                            const loc_sec = &sections[rel_sec.shdr.info];
-                            const loc_node = switch (loc_sec.placement) {
-                                .none => continue,
-                                .progbits => |isi| isi.node(elf),
-                                .nobits => return diags.failParse(
+                                error.UnsupportedSectionFlags => if (!section.shdr.flags.shf.ALLOC) {
+                                    // It probably doesn't matter, just skip this section.
+                                    continue;
+                                } else return diags.failParse(
                                     path,
-                                    "cannot apply relocation to SHT_NOBITS section '{s}'",
-                                    .{std.mem.sliceTo(shstrtab[loc_sec.shdr.name..], 0)},
+                                    "unsupported flags for section '{s}'",
+                                    .{name},
+                                ),
+                                error.SectionTypeConflict => if (!section.shdr.flags.shf.ALLOC) {
+                                    // It probably doesn't matter, just skip this section.
+                                    continue;
+                                } else return diags.failParse(
+                                    path,
+                                    "type of section '{s}' conflicts with other inputs",
+                                    .{name},
+                                ),
+                                error.SectionFlagsConflict => if (!section.shdr.flags.shf.ALLOC) {
+                                    // It probably doesn't matter, just skip this section.
+                                    continue;
+                                } else return diags.failParse(
+                                    path,
+                                    "flags of section '{s}' conflict with other inputs",
+                                    .{name},
+                                ),
+                                error.UnsupportedNobitsSection => return diags.failParse(
+                                    path,
+                                    "unsupported section type SHT_NOBITS for non-bss section '{s}'",
+                                    .{name},
                                 ),
                             };
-
-                            elf.resetNodeRelocs(loc_node);
-
-                            const relnum = std.math.divExact(
-                                u32,
-                                @intCast(rel_sec.shdr.size),
-                                @intCast(rel_sec.shdr.entsize),
-                            ) catch return diags.failParse(
-                                path,
-                                "relocation section size (0x{x}) is not a multiple of entsize (0x{x})",
-                                .{ rel_sec.shdr.size, rel_sec.shdr.entsize },
-                            );
-                            try elf.ensureUnusedRelocCapacity(loc_node, relnum);
-                            try fr.seekTo(fl.offset + rel_sec.shdr.offset);
-                            for (0..relnum) |_| {
-                                const rel = try r.peekStruct(Rel, target_endian);
-                                try r.discardAll64(rel_sec.shdr.entsize);
-                                if (rel.info.sym == 0) continue;
-                                if (rel.info.sym > symnum) return diags.failParse(
+                            if (section.shdr.flags.shf.COMPRESSED) {
+                                // SHF_COMPRESSED is only allowed on non-alloc sections.
+                                if (section.shdr.flags.shf.ALLOC) return diags.failParse(
                                     path,
-                                    "relocation target symbol index {d} exceeds symtab size",
-                                    .{rel.info.sym},
+                                    "section '{s}' has conflicting flags SHF_ALLOC and SHF_COMPRESSED",
+                                    .{name},
                                 );
-                                const target = symmap.items[rel.info.sym - 1];
-                                if (target == Symbol.Id.null) {
-                                    // If this is not an SHF_ALLOC section, then let's not report
-                                    // this for now, because it probably doesn't affect the final
-                                    // binary's functionality for this section to be a bit broken.
-                                    if (loc_sec.shdr.flags.shf.ALLOC) {
-                                        diags.addParseError(
-                                            path,
-                                            "unsupported symbol at index {d} required for relocation",
-                                            .{rel.info.sym},
-                                        );
-                                    }
-                                    continue;
-                                }
-                                const rt: MachineRelocType = .wrap(rel.info.type, elf);
-                                elf.addRelocAssumeCapacity(
-                                    loc_node,
-                                    rel.offset - loc_sec.shdr.addr,
-                                    target,
-                                    rel.addend,
-                                    rt,
-                                ) catch |err| switch (err) {
-                                    else => |e| return e,
-                                    error.UnknownRelocation => diags.addParseError(
-                                        path,
-                                        "unknown relocation type '{f}'",
-                                        .{rt.fmt(elf)},
-                                    ),
-                                    error.NonStaticRelocation => diags.addParseError(
-                                        path,
-                                        "non-static relocation type '{f}'",
-                                        .{rt.fmt(elf)},
-                                    ),
-                                    error.UnimplementedRelocation => diags.addParseError(
-                                        path,
-                                        "TODO(Elf2): unimplemented relocation type '{f}'",
-                                        .{rt.fmt(elf)},
-                                    ),
-                                };
+                                // TODO: handle compressed input sections. We'll need to set a flag to
+                                // indicate that `flushInputSection` needs to decompress the section.
+                                // But because this section isn't SHF_ALLOC, it's probably okay to just
+                                // skip it for now.
+                                continue;
                             }
+                            break :opts .{
+                                .shndx = shndx,
+                                // For well-known sections, we know that it's fine to have e.g. random
+                                // padding, so there's no need to make the sections fixed. For custom
+                                // sections, however, we do want fixed nodes to avoid padding.
+                                .node_fixed = shndx != .text and
+                                    shndx != .rodata and
+                                    shndx != .data and
+                                    shndx != .data_rel_ro and
+                                    shndx != elf.shndx.tdata,
+                            };
+                        },
+                        inline .INIT_ARRAY, .FINI_ARRAY, .PREINIT_ARRAY => |@"type"| .{
+                            .shndx = shndx: {
+                                // TODO: the input section name may include a "priority" value between 1
+                                // and 65535 which should affect the order we assemble input sections in
+                                const init_fini_section_name: []const u8 = switch (@"type") {
+                                    .INIT_ARRAY => "init_array",
+                                    .FINI_ARRAY => "fini_array",
+                                    .PREINIT_ARRAY => "preinit_array",
+                                    else => comptime unreachable,
+                                };
+                                const shndx: *Section.Index = &@field(elf.shndx, init_fini_section_name);
+                                const need_addralign: u8 = switch (class) {
+                                    .NONE, _ => unreachable,
+                                    .@"32" => 4,
+                                    .@"64" => 8,
+                                };
+                                if (section.shdr.addralign != need_addralign) {
+                                    return diags.failParse(path, "bad addralign on {t} shdr", .{@"type"});
+                                }
+                                if (shndx.* == .UNDEF) {
+                                    try elf.createInitFiniArraySection(shndx, init_fini_section_name, @"type");
+                                }
+                                switch (elf.shdrPtr(shndx.*)) {
+                                    inline else => |shdr| {
+                                        const old_size = elf.targetLoad(&shdr.size);
+                                        const new_size = old_size + section.shdr.size;
+                                        elf.targetStore(&shdr.size, @intCast(new_size));
+                                        elf.updateInitFiniArraySectionSize(shndx.*, init_fini_section_name);
+                                    },
+                                }
+                                break :shndx shndx.*;
+                            },
+                            // This node must be fixed to prevent padding from being added between different
+                            // INIT_ARRAY/FINI_ARRAY/PREINIT_ARRAY input sections.
+                            .node_fixed = true,
                         },
                     };
-                },
-            };
+                    const need_align: Alignment = .fromByteUnits(
+                        std.math.ceilPowerOfTwoAssert(usize, @intCast(@max(section.shdr.addralign, 1))),
+                    );
+
+                    try opts.shndx.ensureAligned(elf, need_align);
+
+                    if (sect_type == .NOBITS) {
+                        const offset: u64 = switch (elf.shdrPtr(opts.shndx)) {
+                            inline else => |shdr| offset: {
+                                // Bump our BSS output section size
+                                const old_size: u64 = elf.targetLoad(&shdr.size);
+                                const offset = need_align.forward(old_size);
+                                elf.targetStore(&shdr.size, @intCast(offset + section.shdr.size));
+                                break :offset offset;
+                            },
+                        };
+
+                        section.placement = .{ .nobits = .{
+                            .shndx = opts.shndx,
+                            .offset = offset,
+                        } };
+                        if (opts.shndx == elf.shndx.bss) {
+                            input_has_bss = true;
+                        } else if (opts.shndx == elf.shndx.tbss) {
+                            input_has_tbss = true;
+                        } else {
+                            assert(elf.ehdrType() == .REL);
+                        }
+
+                        continue;
+                    }
+
+                    const add_node_opts: MappedFile.Node.AddOptions = .{
+                        .size = need_align.forward(section.shdr.size),
+                        .alignment = need_align,
+                        .moved = true, // see assert at end of `flushInputSection`
+                    };
+                    const ni = elf.addNodeAssumeCapacity(
+                        if (opts.node_fixed) ni: {
+                            const shndx_ni = opts.shndx.node(elf);
+                            const after_oni: MappedFile.Node.Index.Optional = after: {
+                                var node_it = shndx_ni.last(&elf.mf);
+                                while (node_it.unwrap()) |cur_ni| {
+                                    switch (cur_ni.position(&elf.mf)) {
+                                        .header => break :after .wrap(cur_ni), // last header
+                                        .footer, .floating => node_it = cur_ni.prev(&elf.mf),
+                                    }
+                                } else {
+                                    break :after .none;
+                                }
+                            };
+                            break :ni try shndx_ni.addHeaderChildAfter(gpa, &elf.mf, after_oni, add_node_opts);
+                        } else try opts.shndx.node(elf).addFloatingChild(gpa, &elf.mf, add_node_opts),
+                        .{ .input_section = @fromBackingInt(@intCast(elf.input_sections.items.len)) },
+                    );
+                    section.placement = .{ .progbits = @fromBackingInt(@intCast(elf.input_sections.items.len)) };
+                    elf.input_sections.addOneAssumeCapacity().* = .{
+                        .input = input_index,
+                        .file_location = .{
+                            .offset = fl.offset + section.shdr.offset,
+                            .size = if (section.shdr.type == .NOBITS) 0 else section.shdr.size,
+                        },
+                        // The section vaddr is initially 0, because the symbol addresses are
+                        // zero-based. This will eventually be updated by `flushMoved`.
+                        .vaddr = 0,
+                        .node = ni,
+                        .first_symbol_reloc = .none,
+                    };
+                    elf.input_prog_node.increaseEstimatedTotalItems(1);
+                }
+            }
+
+            // This array will exclude the "null" symbol (symtab index 0).
+            var symmap: std.ArrayList(Symbol.Id) = .empty;
+            defer symmap.deinit(gpa);
+
+            const maybe_symtab_shndx: ?usize = for (sections[1..], 1..) |*symtab, symtab_shndx| {
+                if (symtab.shdr.type == .SYMTAB) break symtab_shndx;
+            } else null;
+
+            if (maybe_symtab_shndx) |symtab_shndx| {
+                const symtab = &sections[symtab_shndx];
+
+                const symbols_trace = tracy.traceNamed(@src(), "scan input symbols");
+                defer symbols_trace.end();
+
+                for (sections[symtab_shndx + 1 ..]) |*other_section| {
+                    if (other_section.shdr.type == .SYMTAB) {
+                        return diags.failParse(path, "multiple SHT_SYMTAB sections", .{});
+                    }
+                }
+
+                if (symtab.shdr.entsize < @sizeOf(ElfN.Sym))
+                    return diags.failParse(path, "unsupported symtab entsize", .{});
+
+                const strtab = strtab: {
+                    if (symtab.shdr.link == std.elf.SHN_UNDEF or symtab.shdr.link >= ehdr.shnum)
+                        return diags.failParse(path, "missing symbol names", .{});
+                    const shdr = &sections[symtab.shdr.link].shdr;
+                    if (shdr.type != .STRTAB)
+                        return diags.failParse(path, "invalid strtab type", .{});
+                    const strtab = try gpa.alloc(u8, @intCast(shdr.size));
+                    errdefer gpa.free(strtab);
+                    try fr.seekTo(fl.offset + shdr.offset);
+                    try r.readSliceAll(strtab);
+                    break :strtab strtab;
+                };
+                defer gpa.free(strtab);
+
+                const symnum = std.math.divExact(
+                    u32,
+                    @intCast(symtab.shdr.size),
+                    @intCast(symtab.shdr.entsize),
+                ) catch return diags.failParse(
+                    path,
+                    "symtab section size (0x{x}) is not a multiple of entsize (0x{x})",
+                    .{ symtab.shdr.size, symtab.shdr.entsize },
+                );
+
+                try symmap.resize(gpa, symnum -| 1); // -1 to exclude "null" symbol
+                try fr.seekTo(fl.offset + symtab.shdr.offset + symtab.shdr.entsize); // +entsize to skip "null" symbol
+                for (symmap.items) |*si| {
+                    si.* = .null;
+                    const input_sym = try r.peekStruct(ElfN.Sym, target_endian);
+                    try r.discardAll64(symtab.shdr.entsize);
+                    if (input_sym.name >= strtab.len or input_sym.shndx >= ehdr.shnum) continue;
+
+                    const name = std.mem.sliceTo(strtab[input_sym.name..], 0);
+
+                    const symbol_trace = tracy.traceNamed(@src(), "input symbol");
+                    defer symbol_trace.end();
+                    symbol_trace.addText(name);
+
+                    const sym_type: std.elf.STT = switch (input_sym.info.type) {
+                        .NOTYPE, .OBJECT, .FUNC, .TLS => |t| t,
+                        .SECTION => .NOTYPE,
+                        .FILE, .COMMON, _ => continue,
+                    };
+
+                    if (input_sym.shndx == std.elf.SHN_UNDEF) switch (input_sym.info.bind) {
+                        else => |bind| return diags.failParse(
+                            path,
+                            "symbol '{s}' has unsupported binding (0x{x})",
+                            .{ name, bind },
+                        ),
+                        .LOCAL => continue,
+                        .GLOBAL, .WEAK, .GNU_UNIQUE => |bind| {
+                            si.* = .global(elf.addGlobalSymbol(.{
+                                .node = .none,
+                                .name = name,
+                                .value = input_sym.value,
+                                .size = input_sym.size,
+                                .type = sym_type,
+                                .bind = switch (bind) {
+                                    .WEAK, .GNU_UNIQUE => .weak,
+                                    .GLOBAL => .strong,
+                                    else => unreachable,
+                                },
+                                .visibility = input_sym.other.visibility,
+                                .shndx = .UNDEF,
+                            }) catch |err| switch (err) {
+                                error.MultipleDefinitions => unreachable, // shndx is .UNDEF
+                                error.MultipleDefaultVersions => unreachable, // shndx is .UNDEF
+                                error.UndefinedDefaultVersion => return diags.failParse(
+                                    path,
+                                    "symbol '{s}' specifies default version without defining it",
+                                    .{name},
+                                ),
+                                else => |e| return e,
+                            });
+                            continue;
+                        },
+                    };
+
+                    const symbol_oni: MappedFile.Node.Index.Optional, const output_shndx: Section.Index, const symbol_value: u64 = switch (sections[input_sym.shndx].placement) {
+                        .none => continue,
+                        .progbits => |isi| .{
+                            .wrap(isi.node(elf)),
+                            elf.getNodeShndx(isi.node(elf)),
+                            input_sym.value,
+                        },
+                        .nobits => |nobits| sym: {
+                            const section_base: u64 = switch (elf.ehdrType()) {
+                                .REL => 0,
+                                .EXEC, .DYN => base: {
+                                    if (elf.ni.tls != .none and
+                                        nobits.shndx == elf.shndx.tbss)
+                                    {
+                                        break :base elf.tbssOffset();
+                                    }
+                                    assert(nobits.shndx == elf.shndx.bss);
+                                    break :base nobits.shndx.vaddr(elf);
+                                },
+                            };
+                            break :sym .{
+                                .none,
+                                nobits.shndx,
+                                section_base + nobits.offset + input_sym.value,
+                            };
+                        },
+                    };
+
+                    switch (input_sym.info.bind) {
+                        else => |bind| return diags.failParse(
+                            path,
+                            "symbol '{s}' has unsupported binding (0x{x})",
+                            .{ name, bind },
+                        ),
+                        .LOCAL => {
+                            const lsi = try elf.addLocalSymbol(.{
+                                .node = symbol_oni,
+                                .name = name,
+                                .value = symbol_value,
+                                .size = input_sym.size,
+                                .type = sym_type,
+                                .shndx = output_shndx,
+                            });
+                            si.* = .local(lsi);
+                        },
+                        .GLOBAL, .WEAK, .GNU_UNIQUE => |bind| {
+                            si.* = .global(elf.addGlobalSymbol(.{
+                                .node = symbol_oni,
+                                .name = name,
+                                .value = symbol_value,
+                                .size = input_sym.size,
+                                .type = sym_type,
+                                .bind = switch (bind) {
+                                    .WEAK, .GNU_UNIQUE => .weak,
+                                    .GLOBAL => .strong,
+                                    else => unreachable,
+                                },
+                                .visibility = input_sym.other.visibility,
+                                .shndx = output_shndx,
+                            }) catch |err| switch (err) {
+                                error.MultipleDefinitions => return diags.failParse(
+                                    path,
+                                    "multiple definitions of '{s}'",
+                                    .{name},
+                                ),
+                                error.MultipleDefaultVersions => return diags.failParse(
+                                    path,
+                                    "multiple default versions of '{s}'",
+                                    .{parseVersionedSymbolName(name).name},
+                                ),
+                                error.UndefinedDefaultVersion => unreachable, // shndx is not `.UNDEF` (i.e. the symbol is defined)
+                                else => |e| return e,
+                            });
+                        },
+                    }
+                }
+            }
+
+            {
+                const all_relocs_trace = tracy.traceNamed(@src(), "scan input relocations");
+                defer all_relocs_trace.end();
+                for (sections[1..]) |*rel_sec| switch (rel_sec.shdr.type) {
+                    else => {},
+                    inline .REL, .RELA => |sht| {
+                        const relocs_trace = tracy.traceNamed(@src(), "input relocation section");
+                        defer relocs_trace.end();
+
+                        const link_is_symtab: bool = if (maybe_symtab_shndx) |symtab_shndx| s: {
+                            break :s rel_sec.shdr.link == symtab_shndx;
+                        } else false;
+                        if (!link_is_symtab) {
+                            return diags.failParse(path, "relocation section does not link to SHT_SYMTAB section", .{});
+                        }
+                        if (rel_sec.shdr.info == std.elf.SHN_UNDEF or rel_sec.shdr.info >= ehdr.shnum) {
+                            return diags.failParse(
+                                path,
+                                "relocation section 'sh_info' refers to invalid section index '{d}'",
+                                .{rel_sec.shdr.info},
+                            );
+                        }
+                        const Rel = switch (sht) {
+                            else => comptime unreachable,
+                            .REL => ElfN.Rel,
+                            .RELA => ElfN.Rela,
+                        };
+                        if (rel_sec.shdr.entsize < @sizeOf(Rel))
+                            return diags.failParse(path, "unsupported rel entsize", .{});
+
+                        const loc_sec = &sections[rel_sec.shdr.info];
+                        relocs_trace.addText(std.mem.sliceTo(shstrtab[loc_sec.shdr.name..], 0));
+                        const loc_node = switch (loc_sec.placement) {
+                            .none => continue,
+                            .progbits => |isi| isi.node(elf),
+                            .nobits => return diags.failParse(
+                                path,
+                                "cannot apply relocation to SHT_NOBITS section '{s}'",
+                                .{std.mem.sliceTo(shstrtab[loc_sec.shdr.name..], 0)},
+                            ),
+                        };
+
+                        elf.resetNodeRelocs(loc_node);
+
+                        const relnum = std.math.divExact(
+                            u32,
+                            @intCast(rel_sec.shdr.size),
+                            @intCast(rel_sec.shdr.entsize),
+                        ) catch return diags.failParse(
+                            path,
+                            "relocation section size (0x{x}) is not a multiple of entsize (0x{x})",
+                            .{ rel_sec.shdr.size, rel_sec.shdr.entsize },
+                        );
+                        try elf.ensureUnusedRelocCapacity(loc_node, relnum);
+                        try fr.seekTo(fl.offset + rel_sec.shdr.offset);
+                        for (0..relnum) |_| {
+                            const rel = try r.peekStruct(Rel, target_endian);
+                            try r.discardAll64(rel_sec.shdr.entsize);
+                            if (rel.info.sym == 0) continue;
+                            if (rel.info.sym - 1 > symmap.items.len) return diags.failParse(
+                                path,
+                                "relocation target symbol index {d} exceeds symtab size",
+                                .{rel.info.sym},
+                            );
+                            const target = symmap.items[rel.info.sym - 1];
+                            if (target == Symbol.Id.null) {
+                                // If this is not an SHF_ALLOC section, then let's not report
+                                // this for now, because it probably doesn't affect the final
+                                // binary's functionality for this section to be a bit broken.
+                                if (loc_sec.shdr.flags.shf.ALLOC) {
+                                    diags.addParseError(
+                                        path,
+                                        "unsupported symbol at index {d} required for relocation",
+                                        .{rel.info.sym},
+                                    );
+                                }
+                                continue;
+                            }
+                            const rt: MachineRelocType = .wrap(rel.info.type, elf);
+                            elf.addRelocAssumeCapacity(
+                                loc_node,
+                                rel.offset - loc_sec.shdr.addr,
+                                target,
+                                rel.addend,
+                                rt,
+                            ) catch |err| switch (err) {
+                                else => |e| return e,
+                                error.UnknownRelocation => diags.addParseError(
+                                    path,
+                                    "unknown relocation type '{f}'",
+                                    .{rt.fmt(elf)},
+                                ),
+                                error.NonStaticRelocation => diags.addParseError(
+                                    path,
+                                    "non-static relocation type '{f}'",
+                                    .{rt.fmt(elf)},
+                                ),
+                                error.UnimplementedRelocation => diags.addParseError(
+                                    path,
+                                    "TODO(Elf2): unimplemented relocation type '{f}'",
+                                    .{rt.fmt(elf)},
+                                ),
+                            };
+                        }
+                    },
+                };
+            }
 
             if (input_has_bss) {
                 try elf.bss_inputs.append(gpa, input_index);
@@ -8435,6 +8497,10 @@ fn loadDso(
     fallback_soname: link.Input.Dso.FallbackSoname,
     fr: *Io.File.Reader,
 ) (LoadParseInputError || error{BadMagic})!void {
+    const trace = tracy.trace(@src());
+    defer trace.end();
+    trace.addTextFmt("{f}", .{path.fmtEscapeString()});
+
     const comp = elf.base.comp;
     const gpa = comp.gpa;
     const diags = &comp.link_diags;
@@ -8580,6 +8646,9 @@ fn loadDso(
             const verdef: []DsoGlobals.String.Optional = verdef: {
                 const verdef_sh = shdr.verdef orelse break :verdef &.{};
 
+                const versions_trace = tracy.traceNamed(@src(), "dso versions");
+                defer versions_trace.end();
+
                 // This parsing is a bit of a mess because it appears that at this moment in history
                 // nobody at GNU was yet aware of the concept of an "array".
 
@@ -8662,6 +8731,9 @@ fn loadDso(
             };
             const soname = try elf.string(.dynstr, soname_slice);
             try elf.needed.put(gpa, soname, {});
+
+            const symbols_trace = tracy.traceNamed(@src(), "dso symbols");
+            defer symbols_trace.end();
 
             // Scan the symbol table and populate `elf.dso_globals`.
             const first_global = @min(shdr.dynsym.info, symnum);
@@ -9544,6 +9616,9 @@ fn addRelocAssumeCapacity(
     addend: i64,
     @"type": MachineRelocType,
 ) (Error || error{ UnknownRelocation, NonStaticRelocation, UnimplementedRelocation })!void {
+    const trace = tracy.trace(@src());
+    defer trace.end();
+
     switch (elf.ehdrType()) {
         .REL => {
             const rela_shndx = elf.getNodeShndx(node).get(elf).rela.shndx;
@@ -9924,6 +9999,9 @@ fn addSymbolRelocAssumeCapacityInner(
     @"type": SymbolReloc.Type,
 ) Error!void {
     assert(elf.ehdrType() != .REL);
+
+    const trace = tracy.trace(@src());
+    defer trace.end();
 
     const gpa = elf.base.comp.gpa;
 
