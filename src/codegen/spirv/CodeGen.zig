@@ -1137,113 +1137,39 @@ fn constBool(cg: *CodeGen, value: bool, repr: Repr) !Id {
     }
 }
 
-/// Returns the OpSwitch literal int corresponding to ref (case of the switch),
-/// where ty is the type we switch on and words is the width of the literal
-/// (words = 1 means up to 32 bits, and 2 means 64 bits).
-fn literalInt(cg: *CodeGen, ty: Type, words: u32, ref: Air.Inst.Ref) spec.LiteralContextDependentNumber {
-    const zcu = cg.zcu;
+fn literalInt(cg: *CodeGen, bits: u16, value: u64) spec.LiteralContextDependentNumber {
     const target = cg.zcu.getTarget();
-
-    var int_ty: Type = ty;
-    var value: Value = .fromInterned(ref.toInterned().?);
-    const int_val: u64 = blk: switch (int_ty.zigTypeTag(zcu)) {
-        .bool, .int => if (int_ty.isSignedInt(zcu)) switch (target.os.tag) {
-            // Kernel only supports unsigned ints, so use the unsigned backing type.
-            .opencl, .amdhsa => switch (cg.backingIntBits(int_ty.intInfo(zcu).bits).@"0") {
-                inline 8, 16, 32, 64 => |bits| @as(@Int(.unsigned, bits), @truncate(@as(u64, @bitCast(value.toSignedInt(zcu))))),
-                else => unreachable,
-            },
-            else => @bitCast(value.toSignedInt(zcu)),
-        } else value.toUnsignedInt(zcu),
-        .@"enum" => {
-            // Handle proper backingInt conversion in the .int case.
-            int_ty = int_ty.backingIntType(zcu);
-            value = value.backingInt(zcu);
-            continue :blk .int;
-        },
-        .error_set => value.getErrorInt(zcu),
-        .pointer => value.toUnsignedInt(zcu),
-        else => unreachable,
-    };
-
-    return switch (words) {
-        1 => .{ .uint32 = @truncate(int_val) },
-        2 => .{ .uint64 = int_val },
-        else => unreachable,
-    };
+    var int_val = value;
+    if (bits < 32 and (target.os.tag == .opencl or target.os.tag == .amdhsa)) {
+        int_val &= (@as(u64, 1) << @intCast(bits)) - 1;
+    }
+    return if (bits <= 32) .{ .uint32 = @truncate(int_val) } else .{ .uint64 = int_val };
 }
 
 /// Emits an integer constant.
-/// This function, unlike cg.constInt, takes care to bitcast
-/// the value to an unsigned int first for Kernels.
 fn constInt(cg: *CodeGen, ty: Type, value: anytype) !Id {
     const gpa = cg.gpa;
     const zcu = cg.zcu;
-    const target = cg.zcu.getTarget();
     const scalar_ty = ty.scalarType(zcu);
-    const int_info = scalar_ty.intInfo(zcu);
-    // Use backing bits so that negatives are sign extended
-    const backing_bits, const big_int = cg.backingIntBits(int_info.bits);
-    assert(backing_bits != 0); // u0 is comptime
-
-    const result_ty_id = try cg.resolveType(scalar_ty, .indirect);
-    const signedness: Signedness = switch (@typeInfo(@TypeOf(value))) {
-        .int => |int| int.signedness,
-        .comptime_int => if (value < 0) .signed else .unsigned,
-        else => unreachable,
-    };
-    if (@TypeOf(value) != comptime_int and @sizeOf(@TypeOf(value)) >= 4 and big_int) {
-        const value64: u64 = switch (signedness) {
-            .signed => @bitCast(@as(i64, @intCast(value))),
-            .unsigned => @as(u64, @intCast(value)),
-        };
-        const n_limbs = backing_bits / cg.bigIntBits();
-        const fill: u32 = if (signedness == .signed and value < 0) 0xFFFFFFFF else 0;
-        const scratch_top = cg.id_scratch.items.len;
-        defer cg.id_scratch.shrinkRetainingCapacity(scratch_top);
-        const constituents = try cg.id_scratch.addManyAsSlice(gpa, n_limbs);
-        for (constituents, 0..) |*c, i| {
-            c.* = try cg.constInt(
-                .u32,
-                if (i < 2) @as(u32, @truncate(value64 >> @intCast(i * 32))) else fill,
-            );
-        }
-        return cg.constantComposite(result_ty_id, constituents);
-    }
-
-    const final_value: spec.LiteralContextDependentNumber = switch (target.os.tag) {
-        .opencl, .amdhsa => blk: {
-            const value64: u64 = switch (signedness) {
-                .signed => @bitCast(@as(i64, @intCast(value))),
-                .unsigned => @as(u64, @intCast(value)),
-            };
-
-            // Manually truncate the value to the right amount of bits.
-            const truncated_value = if (backing_bits == 64)
-                value64
-            else
-                value64 & ((@as(u64, 1) << @intCast(backing_bits)) - 1);
-
-            break :blk switch (backing_bits) {
-                1...32 => .{ .uint32 = @truncate(truncated_value) },
-                33...64 => .{ .uint64 = truncated_value },
-                else => unreachable,
-            };
-        },
-        else => switch (backing_bits) {
-            1...32 => if (signedness == .signed) .{ .int32 = @intCast(value) } else .{ .uint32 = @intCast(value) },
-            33...64 => if (signedness == .signed) .{ .int64 = value } else .{ .uint64 = value },
+    const backing_bits, _ = cg.backingIntBits(scalar_ty.intInfo(zcu).bits);
+    const endian = zcu.getTarget().cpu.arch.endian();
+    const bytes = try gpa.alloc(u8, backing_bits / 8);
+    defer gpa.free(bytes);
+    if (@TypeOf(value) == std.math.big.int.Const) {
+        value.writeTwosComplement(bytes, endian);
+    } else {
+        const Int = switch (@typeInfo(@TypeOf(value))) {
+            .comptime_int => std.math.IntFittingRange(value, value),
+            .int => @TypeOf(value),
             else => unreachable,
-        },
-    };
-
-    const result_id = cg.allocId();
-    try cg.module.emit(cg.gpa, .OpConstant, .{
-        .id_result_type = result_ty_id,
-        .id_result = result_id,
-        .value = final_value,
-    });
-
+        };
+        @memset(bytes, if (value < 0) 0xff else 0);
+        if (@bitSizeOf(Int) != 0) {
+            const bits = @min(backing_bits, @bitSizeOf(Int));
+            std.mem.writeVarPackedInt(bytes, 0, bits, @as(Int, value), endian);
+        }
+    }
+    const result_id = try cg.constIntBytes(scalar_ty, bytes, backing_bits);
     if (!ty.isVector(zcu)) return result_id;
 
     const vector_ty_id = try cg.resolveType(ty, .direct);
@@ -1251,6 +1177,34 @@ fn constInt(cg: *CodeGen, ty: Type, value: anytype) !Id {
     defer gpa.free(constituents);
     @memset(constituents, result_id);
     return cg.constantComposite(vector_ty_id, constituents);
+}
+
+fn constIntBytes(cg: *CodeGen, ty: Type, bytes: []const u8, bit_count: u16) Error!Id {
+    const target = cg.zcu.getTarget();
+    const endian = target.cpu.arch.endian();
+    const int_info = ty.intInfo(cg.zcu);
+    const backing_bits, const big_int = cg.backingIntBits(int_info.bits);
+    const limb_bits = if (big_int) cg.bigIntBits() else backing_bits;
+    const limb_ty_id = if (big_int) try cg.limbTypeId() else try cg.resolveType(ty, .indirect);
+    const constituents = try cg.gpa.alloc(Id, backing_bits / limb_bits);
+    defer cg.gpa.free(constituents);
+    for (constituents, 0..) |*constituent, i| {
+        const offset = i * limb_bits;
+        const bits = @min(limb_bits, bit_count - offset);
+        var value = std.mem.readVarPackedInt(u64, bytes, offset, bits, endian, .unsigned);
+        if (i == constituents.len - 1 and int_info.signedness == .signed) {
+            const shift: u6 = @intCast(64 - bits);
+            value = @bitCast(@as(i64, @bitCast(value << shift)) >> shift);
+        }
+        constituent.* = cg.allocId();
+        try cg.module.emit(cg.gpa, .OpConstant, .{
+            .id_result_type = limb_ty_id,
+            .id_result = constituent.*,
+            .value = cg.literalInt(limb_bits, value),
+        });
+    }
+    if (!big_int) return constituents[0];
+    return cg.constantComposite(try cg.resolveType(ty, .indirect), constituents);
 }
 
 fn constantComposite(cg: *CodeGen, result_ty_id: Id, constituents: []const Id) !Id {
@@ -1372,44 +1326,8 @@ fn constant(cg: *CodeGen, ty: Type, val: Value, repr: Repr) Error!Id {
             .false, .true => break :cache try cg.constBool(val.toBool(), repr),
         },
         .int => {
-            const int_info = ty.intInfo(zcu);
-            const backing_bits, const is_big_int = cg.backingIntBits(int_info.bits);
-            if (is_big_int) {
-                const limb_bits = cg.bigIntBits();
-                const n_limbs = backing_bits / limb_bits;
-                const big_result_ty_id = try cg.resolveType(ty, .indirect);
-                var bigint_space: Value.BigIntSpace = undefined;
-                const bigint = val.toBigInt(&bigint_space, zcu);
-                const limb_bytes = try gpa.alloc(u8, backing_bits / 8);
-                defer gpa.free(limb_bytes);
-                bigint.writeTwosComplement(limb_bytes, .little);
-                const scratch_top = cg.id_scratch.items.len;
-                defer cg.id_scratch.shrinkRetainingCapacity(scratch_top);
-                const constituents = try cg.id_scratch.addManyAsSlice(gpa, n_limbs);
-                switch (limb_bits) {
-                    32 => {
-                        const limbs_u32: []u32 = @ptrCast(@alignCast(limb_bytes));
-                        for (constituents, limbs_u32) |*c, v| {
-                            const host_v = if (builtin.cpu.arch.endian() == .big) @byteSwap(v) else v;
-                            c.* = try cg.constInt(.u32, host_v);
-                        }
-                    },
-                    64 => {
-                        const limbs_u64: []u64 = @ptrCast(@alignCast(limb_bytes));
-                        for (constituents, limbs_u64) |*c, v| {
-                            const host_v = if (builtin.cpu.arch.endian() == .big) @byteSwap(v) else v;
-                            c.* = try cg.constInt(.u64, host_v);
-                        }
-                    },
-                    else => unreachable,
-                }
-                break :cache try cg.constantComposite(big_result_ty_id, constituents);
-            }
-            if (ty.isSignedInt(zcu)) {
-                break :cache try cg.constInt(ty, val.toSignedInt(zcu));
-            } else {
-                break :cache try cg.constInt(ty, val.toUnsignedInt(zcu));
-            }
+            var space: Value.BigIntSpace = undefined;
+            break :cache try cg.constInt(ty, val.toBigInt(&space, zcu));
         },
         .float => {
             const lit: spec.LiteralContextDependentNumber = switch (ty.floatBits(target)) {
@@ -1652,11 +1570,15 @@ fn constant(cg: *CodeGen, ty: Type, val: Value, repr: Repr) Error!Id {
                 return cg.constantComposite(result_ty_id, constituents);
             }
 
-            const payload: ?Id = if (field_ty.hasRuntimeBits(zcu))
-                try cg.constant(field_ty, .fromInterned(un.val), .direct)
-            else
-                null;
-            return try cg.unionInit(ty, active_field, payload);
+            const bytes = try gpa.alloc(u8, @intCast(ty.abiSize(zcu)));
+            defer gpa.free(bytes);
+            val.writeToMemory(zcu, bytes) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return cg.todo("serialize constant of '{f}': {s}", .{
+                    ty.fmt(zcu), @errorName(err),
+                }),
+            };
+            return cg.constantBytes(ty, bytes);
         },
         .bitpack => |bitpack| {
             const int_val: Value = .fromInterned(bitpack.backing_int_val);
@@ -1666,6 +1588,101 @@ fn constant(cg: *CodeGen, ty: Type, val: Value, repr: Repr) Error!Id {
         .memoized_call => unreachable,
     };
     return cacheable_id;
+}
+
+fn constantBytes(cg: *CodeGen, ty: Type, bytes: []const u8) Error!Id {
+    const zcu = cg.zcu;
+    const gpa = cg.gpa;
+    const target = zcu.getTarget();
+    const endian = target.cpu.arch.endian();
+    const ty_id = try cg.resolveType(ty, .indirect);
+    switch (ty.zigTypeTag(zcu)) {
+        .bool => return cg.constBool(bytes[0] & 1 != 0, .indirect),
+        .int => return cg.constIntBytes(ty, bytes, ty.intInfo(zcu).bits),
+        .float => {
+            const val: spec.LiteralContextDependentNumber = switch (ty.floatBits(target)) {
+                16 => .{ .uint32 = std.mem.readInt(u16, bytes[0..2], endian) },
+                32 => .{ .uint32 = std.mem.readInt(u32, bytes[0..4], endian) },
+                64 => .{ .uint64 = std.mem.readInt(u64, bytes[0..8], endian) },
+                else => unreachable,
+            };
+            const result_id = cg.allocId();
+            try cg.module.emit(gpa, .OpConstant, .{
+                .id_result_type = ty_id,
+                .id_result = result_id,
+                .value = val,
+            });
+            return result_id;
+        },
+        .@"enum" => return cg.constantBytes(ty.backingIntType(zcu), bytes),
+        .array, .vector => {
+            const elem_ty = ty.childType(zcu);
+            const elem_size: usize = @intCast(elem_ty.abiSize(zcu));
+            const constituents = try gpa.alloc(Id, @intCast(ty.arrayLenIncludingSentinel(zcu)));
+            defer gpa.free(constituents);
+            for (constituents, 0..) |*constituent, i| {
+                constituent.* = try cg.constantBytes(
+                    elem_ty,
+                    bytes[i * elem_size ..][0..elem_size],
+                );
+            }
+            return cg.constantComposite(ty_id, constituents);
+        },
+        .@"struct", .@"union" => {
+            if (ty.containerLayout(zcu) == .@"packed") {
+                return cg.constantBytes(ty.backingIntType(zcu), bytes);
+            }
+            assert(ty.containerLayout(zcu) == .@"extern");
+            if (ty.zigTypeTag(zcu) == .@"struct") {
+                var constituents: std.ArrayList(Id) = .empty;
+                defer constituents.deinit(gpa);
+                var it = zcu.typeToStruct(ty).?.iterateRuntimeOrder(&zcu.intern_pool);
+                while (it.next()) |field_index| {
+                    const field_ty = ty.fieldType(field_index, zcu);
+                    if (!field_ty.hasRuntimeBits(zcu)) continue;
+                    const offset: usize = @intCast(ty.structFieldOffset(field_index, zcu));
+                    const size: usize = @intCast(field_ty.abiSize(zcu));
+                    const field_id = try cg.constantBytes(field_ty, bytes[offset..][0..size]);
+                    try constituents.append(gpa, field_id);
+                }
+                return cg.constantComposite(ty_id, constituents.items);
+            }
+
+            const layout = cg.unionLayout(ty);
+            assert(layout.tag_size == 0);
+
+            var constituents: [4]Id = undefined;
+            constituents[layout.payload_index] = try cg.constantBytes(
+                layout.payload_ty,
+                bytes[0..layout.payload_size],
+            );
+
+            const padding_size, const padding_index = blk: {
+                if (layout.payload_padding_size != 0) break :blk .{
+                    layout.payload_padding_size,
+                    layout.payload_padding_index,
+                };
+                break :blk .{ layout.padding_size, layout.padding_index };
+            };
+            if (padding_size != 0) {
+                const len_id = try cg.constInt(.u32, padding_size);
+                const padding_ty_id = try cg.arrayType(len_id, try cg.resolveType(.u8, .indirect));
+                const padding_ids = try gpa.alloc(Id, padding_size);
+                defer gpa.free(padding_ids);
+                for (padding_ids, bytes[layout.payload_size..][0..padding_size]) |*padding_id, byte| {
+                    padding_id.* = try cg.constInt(.u8, byte);
+                }
+                constituents[padding_index] = try cg.constantComposite(padding_ty_id, padding_ids);
+            }
+
+            return cg.constantComposite(ty_id, constituents[0..layout.total_fields]);
+        },
+        .pointer => {
+            if (std.mem.allEqual(u8, bytes, 0)) return cg.constNull(ty_id);
+            return cg.todo("non-null pointer constant from bytes", .{});
+        },
+        else => return cg.todo("constant of '{f}' from bytes", .{ty.fmt(zcu)}),
+    }
 }
 
 fn constantPtr(cg: *CodeGen, ptr_val: Value) !Id {
@@ -2470,98 +2487,99 @@ fn unionLayout(cg: *CodeGen, ty: Type) UnionLayout {
     return union_layout;
 }
 
-/// This structure represents a "temporary" value: Something we are currently
-/// operating on. It typically lives no longer than the function that
-/// implements a particular AIR operation. These are used to easier
-/// implement vectorizable operations (see Vectorization and the build*
-/// functions), and typically are only used for vectors of primitive types.
 const Temporary = struct {
-    /// The type of the temporary. This is here mainly
-    /// for easier bookkeeping. Because we will never really
-    /// store Temporaries, they only cause extra stack space,
-    /// therefore no real storage is wasted.
-    ty: Type,
-    /// The value that this temporary holds. This is not necessarily
-    /// a value that is actually usable, or a single value: It is virtual
-    /// until materialize() is called, at which point is turned into
-    /// the usual SPIR-V representation of `cg.ty`.
+    scalar_ty: Type,
+    shape: Shape = .scalar,
     value: Temporary.Value,
+
+    const Shape = union(enum) {
+        scalar,
+        vector: u32,
+        unrolled: u32,
+    };
 
     const Value = union(enum) {
         singleton: Id,
         exploded_vector: IdRange,
     };
 
-    fn init(ty: Type, singleton: Id) Temporary {
-        return .{ .ty = ty, .value = .{ .singleton = singleton } };
+    fn init(scalar_ty: Type, singleton: Id) Temporary {
+        return .{ .scalar_ty = scalar_ty, .value = .{ .singleton = singleton } };
+    }
+
+    fn instructionCount(temp: Temporary) u32 {
+        return switch (temp.shape) {
+            .scalar, .vector => 1,
+            .unrolled => |n| n,
+        };
+    }
+
+    fn at(temp: Temporary, i: usize) Id {
+        return switch (temp.value) {
+            .singleton => |id| id,
+            .exploded_vector => |range| range.at(i),
+        };
+    }
+
+    fn transform(temp: Temporary, cg: *CodeGen, shape: Shape) !Temporary {
+        var result = temp;
+        switch (shape) {
+            .scalar => {
+                assert(temp.shape == .scalar);
+                assert(temp.value == .singleton);
+            },
+            .vector => |n| {
+                result.shape = shape;
+                if (temp.shape != .scalar) {
+                    result.value = .{ .singleton = try temp.materialize(cg) };
+                    return result;
+                }
+                const constituents = try cg.gpa.alloc(Id, n);
+                defer cg.gpa.free(constituents);
+                @memset(constituents, temp.value.singleton);
+                result.value = .{ .singleton = try cg.constructComposite(
+                    try cg.temporaryType(temp.scalar_ty, shape),
+                    constituents,
+                ) };
+            },
+            .unrolled => |n| {
+                if (temp.shape == .scalar or temp.value == .exploded_vector) return temp;
+                const ty_id = try cg.resolveType(temp.scalar_ty, .direct);
+                const range = cg.allocIds(n);
+                for (0..n) |i| {
+                    try cg.body.emit(cg.gpa, .OpCompositeExtract, .{
+                        .id_result_type = ty_id,
+                        .id_result = range.at(i),
+                        .composite = temp.value.singleton,
+                        .indexes = &.{@intCast(i)},
+                    });
+                }
+                result.shape = shape;
+                result.value = .{ .exploded_vector = range };
+            },
+        }
+        return result;
     }
 
     fn materialize(temp: Temporary, cg: *CodeGen) !Id {
-        const gpa = cg.gpa;
-        const zcu = cg.zcu;
         switch (temp.value) {
             .singleton => |id| return id,
             .exploded_vector => |range| {
-                assert(temp.ty.isVector(zcu));
-                assert(temp.ty.vectorLen(zcu) == range.len);
-
+                assert(temp.shape != .scalar);
                 const scratch_top = cg.id_scratch.items.len;
                 defer cg.id_scratch.shrinkRetainingCapacity(scratch_top);
-                const constituents = try cg.id_scratch.addManyAsSlice(gpa, range.len);
-                for (constituents, 0..range.len) |*id, i| {
-                    id.* = range.at(i);
-                }
-
-                const result_ty_id = try cg.resolveType(temp.ty, .direct);
-                return cg.constructComposite(result_ty_id, constituents);
+                const constituents = try cg.id_scratch.addManyAsSlice(cg.gpa, range.len);
+                for (constituents, 0..) |*id, i| id.* = range.at(i);
+                const ty = try cg.temporaryType(temp.scalar_ty, temp.shape);
+                return cg.constructComposite(ty, constituents);
             },
         }
     }
 
-    fn vectorization(temp: Temporary, cg: *CodeGen) Vectorization {
-        return .fromType(temp.ty, cg);
-    }
-
-    fn pun(temp: Temporary, new_ty: Type) Temporary {
-        return .{
-            .ty = new_ty,
-            .value = temp.value,
-        };
-    }
-
-    /// 'Explode' a temporary into separate elements. This turns a vector
-    /// into a bag of elements.
-    fn explode(temp: Temporary, cg: *CodeGen) !IdRange {
-        const zcu = cg.zcu;
-
-        // If the value is a scalar, then this is a no-op.
-        if (!temp.ty.isVector(zcu)) {
-            return switch (temp.value) {
-                .singleton => |id| .{ .base = @backingInt(id), .len = 1 },
-                .exploded_vector => |range| range,
-            };
-        }
-
-        const ty_id = try cg.resolveType(temp.ty.scalarType(zcu), .direct);
-        const n = temp.ty.vectorLen(zcu);
-        const results = cg.allocIds(n);
-
-        const id = switch (temp.value) {
-            .singleton => |id| id,
-            .exploded_vector => |range| return range,
-        };
-
-        for (0..n) |i| {
-            const indexes = [_]u32{@intCast(i)};
-            try cg.body.emit(cg.gpa, .OpCompositeExtract, .{
-                .id_result_type = ty_id,
-                .id_result = results.at(i),
-                .composite = id,
-                .indexes = &indexes,
-            });
-        }
-
-        return results;
+    fn pun(temp: Temporary, scalar_ty: Type) Temporary {
+        var result = temp;
+        result.scalar_ty = scalar_ty;
+        return result;
     }
 };
 
@@ -3293,168 +3311,24 @@ const CompositeInt = struct {
     }
 };
 
-/// Initialize a `Temporary` from an AIR value.
-fn temporary(cg: *CodeGen, inst: Air.Inst.Ref) !Temporary {
+fn temporary(cg: *CodeGen, ty: Type, id: Id) Temporary {
     return .{
-        .ty = cg.typeOf(inst),
-        .value = .{ .singleton = try cg.resolve(inst) },
+        .scalar_ty = ty.scalarType(cg.zcu),
+        .shape = if (!ty.isVector(cg.zcu)) .scalar else if (cg.isSpvVector(ty))
+            .{ .vector = ty.vectorLen(cg.zcu) }
+        else
+            .{ .unrolled = ty.vectorLen(cg.zcu) },
+        .value = .{ .singleton = id },
     };
 }
 
-/// This union describes how a particular operation should be vectorized.
-/// That depends on the operation and number of components of the inputs.
-const Vectorization = union(enum) {
-    /// This is an operation between scalars.
-    scalar,
-    /// This operation is unrolled into separate operations.
-    /// Inputs may still be SPIR-V vectors, for example,
-    /// when the operation can't be vectorized in SPIR-V.
-    /// Value is number of components.
-    unrolled: u32,
-
-    /// Derive a vectorization from a particular type
-    fn fromType(ty: Type, cg: *CodeGen) Vectorization {
-        const zcu = cg.zcu;
-        if (!ty.isVector(zcu)) return .scalar;
-        return .{ .unrolled = ty.vectorLen(zcu) };
-    }
-
-    /// Given two vectorization methods, compute a "unification": a fallback
-    /// that works for both, according to the following rules:
-    /// - Scalars may broadcast
-    /// - SPIR-V vectorized operations will unroll
-    /// - Prefer scalar > unrolled
-    fn unify(a: Vectorization, b: Vectorization) Vectorization {
-        if (a == .scalar and b == .scalar) return .scalar;
-        if (a == .unrolled or b == .unrolled) {
-            if (a == .unrolled and b == .unrolled) assert(a.components() == b.components());
-            if (a == .unrolled) return .{ .unrolled = a.components() };
-            return .{ .unrolled = b.components() };
-        }
-        unreachable;
-    }
-
-    /// Query the number of components that inputs of this operation have.
-    /// Note: for broadcasting scalars, this returns the number of elements
-    /// that the broadcasted vector would have.
-    fn components(vec: Vectorization) u32 {
-        return switch (vec) {
-            .scalar => 1,
-            .unrolled => |n| n,
-        };
-    }
-
-    /// Turns `ty` into the result-type of the entire operation.
-    /// `ty` may be a scalar or vector, it doesn't matter.
-    fn resultType(vec: Vectorization, cg: *CodeGen, ty: Type) !Type {
-        const pt = cg.pt;
-        const zcu = cg.zcu;
-        const scalar_ty = ty.scalarType(zcu);
-        return switch (vec) {
-            .scalar => scalar_ty,
-            .unrolled => |n| try pt.vectorType(.{ .len = n, .child = scalar_ty.toIntern() }),
-        };
-    }
-
-    /// Before a temporary can be used, some setup may need to be one. This function implements
-    /// this setup, and returns a new type that holds the relevant information on how to access
-    /// elements of the input.
-    fn prepare(vec: Vectorization, cg: *CodeGen, tmp: Temporary) !PreparedOperand {
-        const zcu = cg.zcu;
-        const is_vector = tmp.ty.isVector(zcu);
-        const value: PreparedOperand.Value = switch (tmp.value) {
-            .singleton => |id| switch (vec) {
-                .scalar => blk: {
-                    assert(!is_vector);
-                    break :blk .{ .scalar = id };
-                },
-                .unrolled => blk: {
-                    if (is_vector) break :blk .{ .vector_exploded = try tmp.explode(cg) };
-                    break :blk .{ .scalar_broadcast = id };
-                },
-            },
-            .exploded_vector => |range| switch (vec) {
-                .scalar => unreachable,
-                .unrolled => |n| blk: {
-                    assert(range.len == n);
-                    break :blk .{ .vector_exploded = range };
-                },
-            },
-        };
-
-        return .{
-            .ty = tmp.ty,
-            .value = value,
-        };
-    }
-
-    /// Finalize the results of an operation back into a temporary. `results` is
-    /// a list of result-ids of the operation.
-    fn finalize(vec: Vectorization, ty: Type, results: IdRange) Temporary {
-        assert(vec.components() == results.len);
-        return .{
-            .ty = ty,
-            .value = switch (vec) {
-                .scalar => .{ .singleton = results.at(0) },
-                .unrolled => .{ .exploded_vector = results },
-            },
-        };
-    }
-
-    /// This struct represents an operand that has gone through some setup, and is
-    /// ready to be used as part of an operation.
-    const PreparedOperand = struct {
-        ty: Type,
-        value: PreparedOperand.Value,
-
-        /// The types of value that a prepared operand can hold internally. Depends
-        /// on the operation and input value.
-        const Value = union(enum) {
-            /// A single scalar value that is used by a scalar operation.
-            scalar: Id,
-            /// A single scalar that is broadcasted in an unrolled operation.
-            scalar_broadcast: Id,
-            /// A vector represented by a consecutive list of IDs that is used in an unrolled operation.
-            vector_exploded: IdRange,
-        };
-
-        /// Query the value at a particular index of the operation. Note that
-        /// the index is *not* the component/lane, but the index of the *operation*.
-        fn at(op: PreparedOperand, i: usize) Id {
-            switch (op.value) {
-                .scalar => |id| {
-                    assert(i == 0);
-                    return id;
-                },
-                .scalar_broadcast => |id| return id,
-                .vector_exploded => |range| return range.at(i),
-            }
-        }
+fn temporaryType(cg: *CodeGen, scalar_ty: Type, shape: Temporary.Shape) !Id {
+    const scalar_ty_id = try cg.resolveType(scalar_ty, .direct);
+    return switch (shape) {
+        .scalar => scalar_ty_id,
+        .vector => |n| cg.vectorType(n, scalar_ty_id),
+        .unrolled => |n| cg.arrayType(try cg.constInt(.u32, n), scalar_ty_id),
     };
-};
-
-/// A utility function to compute the vectorization style of
-/// a list of values. These values may be any of the following:
-/// - A `Vectorization` instance
-/// - A Type, in which case the vectorization is computed via `Vectorization.fromType`.
-/// - A Temporary, in which case the vectorization is computed via `Temporary.vectorization`.
-fn vectorization(cg: *CodeGen, args: anytype) Vectorization {
-    var v: Vectorization = undefined;
-    assert(args.len >= 1);
-    inline for (args, 0..) |arg, i| {
-        const iv: Vectorization = switch (@TypeOf(arg)) {
-            Vectorization => arg,
-            Type => Vectorization.fromType(arg, cg),
-            Temporary => arg.vectorization(cg),
-            else => @compileError("invalid type"),
-        };
-        if (i == 0) {
-            v = iv;
-        } else {
-            v = v.unify(iv);
-        }
-    }
-    return v;
 }
 
 /// This function builds the conversion between two numeric types: OpFConvert, OpSConvert or
@@ -3462,13 +3336,11 @@ fn vectorization(cg: *CodeGen, args: anytype) Vectorization {
 fn buildConvert(cg: *CodeGen, dst_ty: Type, src: Temporary) !Temporary {
     const zcu = cg.zcu;
 
-    const v = cg.vectorization(.{ dst_ty, src });
-    const result_ty = try v.resultType(cg, dst_ty);
-
     const dst_scalar = dst_ty.scalarType(zcu);
-    const src_scalar = src.ty.scalarType(zcu);
+    const src_scalar = src.scalar_ty;
+    var result = src.pun(dst_scalar);
     if (dst_scalar.toIntern() == src_scalar.toIntern()) {
-        return src.pun(result_ty);
+        return result;
     }
     if (dst_scalar.isInt(zcu) and src_scalar.isInt(zcu)) {
         const dst_info = dst_scalar.intInfo(zcu);
@@ -3476,15 +3348,14 @@ fn buildConvert(cg: *CodeGen, dst_ty: Type, src: Temporary) !Temporary {
         if (cg.backingIntBits(dst_info.bits).@"0" == cg.backingIntBits(src_info.bits).@"0" and
             dst_info.signedness == src_info.signedness)
         {
-            return src.pun(result_ty);
+            return result;
         }
     }
 
-    const ops = v.components();
+    const ops = result.instructionCount();
     const results = cg.allocIds(ops);
 
-    const op_result_ty = dst_ty.scalarType(zcu);
-    const op_result_ty_id = try cg.resolveType(op_result_ty, .direct);
+    const op_result_ty_id = try cg.temporaryType(result.scalar_ty, if (result.shape == .unrolled) .scalar else result.shape);
 
     const opcode: Opcode = blk: {
         if (dst_scalar.isAnyFloat()) {
@@ -3500,7 +3371,7 @@ fn buildConvert(cg: *CodeGen, dst_ty: Type, src: Temporary) !Temporary {
         break :blk .OpUConvert;
     };
 
-    const op_src = try v.prepare(cg, src);
+    const op_src = try src.transform(cg, result.shape);
 
     for (0..ops) |i| {
         try cg.body.emitRaw(cg.gpa, opcode, 3);
@@ -3509,25 +3380,29 @@ fn buildConvert(cg: *CodeGen, dst_ty: Type, src: Temporary) !Temporary {
         cg.body.writeOperand(Id, op_src.at(i));
     }
 
-    return v.finalize(result_ty, results);
+    result.value = switch (result.shape) {
+        .scalar, .vector => .{ .singleton = results.at(0) },
+        .unrolled => .{ .exploded_vector = results },
+    };
+    return result;
 }
 
 fn buildSelect(cg: *CodeGen, condition: Temporary, lhs: Temporary, rhs: Temporary) !Temporary {
     const zcu = cg.zcu;
 
-    const v = cg.vectorization(.{ condition, lhs, rhs });
-    const ops = v.components();
+    var result = lhs;
+    if (result.shape == .scalar) result.shape = rhs.shape;
+    if (result.shape == .scalar) result.shape = condition.shape;
+    const ops = result.instructionCount();
     const results = cg.allocIds(ops);
 
-    const op_result_ty = lhs.ty.scalarType(zcu);
-    const op_result_ty_id = try cg.resolveType(op_result_ty, .direct);
-    const result_ty = try v.resultType(cg, lhs.ty);
+    const op_result_ty_id = try cg.temporaryType(result.scalar_ty, if (result.shape == .unrolled) .scalar else result.shape);
 
-    assert(condition.ty.scalarType(zcu).zigTypeTag(zcu) == .bool);
+    assert(condition.scalar_ty.zigTypeTag(zcu) == .bool);
 
-    const cond = try v.prepare(cg, condition);
-    const object_1 = try v.prepare(cg, lhs);
-    const object_2 = try v.prepare(cg, rhs);
+    const cond = try condition.transform(cg, result.shape);
+    const object_1 = try lhs.transform(cg, result.shape);
+    const object_2 = try rhs.transform(cg, result.shape);
 
     for (0..ops) |i| {
         try cg.body.emit(cg.gpa, .OpSelect, .{
@@ -3539,20 +3414,23 @@ fn buildSelect(cg: *CodeGen, condition: Temporary, lhs: Temporary, rhs: Temporar
         });
     }
 
-    return v.finalize(result_ty, results);
+    result.value = switch (result.shape) {
+        .scalar, .vector => .{ .singleton = results.at(0) },
+        .unrolled => .{ .exploded_vector = results },
+    };
+    return result;
 }
 
 fn buildCmp(cg: *CodeGen, opcode: Opcode, lhs: Temporary, rhs: Temporary) !Temporary {
-    const v = cg.vectorization(.{ lhs, rhs });
-    const ops = v.components();
+    var result = lhs.pun(.bool);
+    if (result.shape == .scalar) result.shape = rhs.shape;
+    const ops = result.instructionCount();
     const results = cg.allocIds(ops);
 
-    const op_result_ty: Type = .bool;
-    const op_result_ty_id = try cg.resolveType(op_result_ty, .direct);
-    const result_ty = try v.resultType(cg, Type.bool);
+    const op_result_ty_id = try cg.temporaryType(result.scalar_ty, if (result.shape == .unrolled) .scalar else result.shape);
 
-    const op_lhs = try v.prepare(cg, lhs);
-    const op_rhs = try v.prepare(cg, rhs);
+    const op_lhs = try lhs.transform(cg, result.shape);
+    const op_rhs = try rhs.transform(cg, result.shape);
 
     for (0..ops) |i| {
         try cg.body.emitRaw(cg.gpa, opcode, 4);
@@ -3562,7 +3440,11 @@ fn buildCmp(cg: *CodeGen, opcode: Opcode, lhs: Temporary, rhs: Temporary) !Tempo
         cg.body.writeOperand(Id, op_rhs.at(i));
     }
 
-    return v.finalize(result_ty, results);
+    result.value = switch (result.shape) {
+        .scalar, .vector => .{ .singleton = results.at(0) },
+        .unrolled => .{ .exploded_vector = results },
+    };
+    return result;
 }
 
 const UnaryOp = enum {
@@ -3636,15 +3518,12 @@ const UnaryOp = enum {
 };
 
 fn buildUnary(cg: *CodeGen, op: UnaryOp, operand: Temporary) !Temporary {
-    const zcu = cg.zcu;
     const target = cg.zcu.getTarget();
-    const v = cg.vectorization(.{operand});
-    const ops = v.components();
+    var result = operand;
+    const ops = result.instructionCount();
     const results = cg.allocIds(ops);
-    const op_result_ty = operand.ty.scalarType(zcu);
-    const op_result_ty_id = try cg.resolveType(op_result_ty, .direct);
-    const result_ty = try v.resultType(cg, operand.ty);
-    const op_operand = try v.prepare(cg, operand);
+    const op_result_ty_id = try cg.temporaryType(result.scalar_ty, if (result.shape == .unrolled) .scalar else result.shape);
+    const op_operand = try operand.transform(cg, result.shape);
 
     if (op.extInstOpcode(target)) |opcode| {
         const set = try cg.importExtendedSet();
@@ -3676,22 +3555,23 @@ fn buildUnary(cg: *CodeGen, op: UnaryOp, operand: Temporary) !Temporary {
         }
     }
 
-    return v.finalize(result_ty, results);
+    result.value = switch (result.shape) {
+        .scalar, .vector => .{ .singleton = results.at(0) },
+        .unrolled => .{ .exploded_vector = results },
+    };
+    return result;
 }
 
 fn buildBinary(cg: *CodeGen, opcode: Opcode, lhs: Temporary, rhs: Temporary) !Temporary {
-    const zcu = cg.zcu;
-
-    const v = cg.vectorization(.{ lhs, rhs });
-    const ops = v.components();
+    var result = lhs;
+    if (result.shape == .scalar) result.shape = rhs.shape;
+    const ops = result.instructionCount();
     const results = cg.allocIds(ops);
 
-    const op_result_ty = lhs.ty.scalarType(zcu);
-    const op_result_ty_id = try cg.resolveType(op_result_ty, .direct);
-    const result_ty = try v.resultType(cg, lhs.ty);
+    const op_result_ty_id = try cg.temporaryType(result.scalar_ty, if (result.shape == .unrolled) .scalar else result.shape);
 
-    const op_lhs = try v.prepare(cg, lhs);
-    const op_rhs = try v.prepare(cg, rhs);
+    const op_lhs = try lhs.transform(cg, result.shape);
+    const op_rhs = try rhs.transform(cg, result.shape);
 
     for (0..ops) |i| {
         try cg.body.emitRaw(cg.gpa, opcode, 4);
@@ -3701,7 +3581,11 @@ fn buildBinary(cg: *CodeGen, opcode: Opcode, lhs: Temporary, rhs: Temporary) !Te
         cg.body.writeOperand(Id, op_rhs.at(i));
     }
 
-    return v.finalize(result_ty, results);
+    result.value = switch (result.shape) {
+        .scalar, .vector => .{ .singleton = results.at(0) },
+        .unrolled => .{ .exploded_vector = results },
+    };
+    return result;
 }
 
 /// This function builds an extended multiplication, either OpSMulExtended or OpUMulExtended on Vulkan,
@@ -3712,23 +3596,17 @@ fn buildWideMul(
     lhs: Temporary,
     rhs: Temporary,
 ) !struct { Temporary, Temporary } {
-    const pt = cg.pt;
-    const zcu = cg.zcu;
-    const comp = zcu.comp;
-    const gpa = comp.gpa;
-    const io = comp.io;
+    const gpa = cg.gpa;
     const target = cg.zcu.getTarget();
-    const ip = &zcu.intern_pool;
 
-    const v = lhs.vectorization(cg).unify(rhs.vectorization(cg));
-    const ops = v.components();
-
-    const arith_op_ty = lhs.ty.scalarType(zcu);
-    const arith_op_ty_id = try cg.resolveType(arith_op_ty, .direct);
-
-    const lhs_op = try v.prepare(cg, lhs);
-    const rhs_op = try v.prepare(cg, rhs);
-
+    var result = lhs;
+    const ops = result.instructionCount();
+    const arith_op_ty_id = try cg.temporaryType(
+        result.scalar_ty,
+        if (result.shape == .unrolled) .scalar else result.shape,
+    );
+    const lhs_op = try lhs.transform(cg, result.shape);
+    const rhs_op = try rhs.transform(cg, result.shape);
     const value_results = cg.allocIds(ops);
     const overflow_results = cg.allocIds(ops);
 
@@ -3763,11 +3641,11 @@ fn buildWideMul(
         .vulkan, .opengl => {
             // Operations return a struct{T, T}
             // where T is maybe vectorized.
-            const op_result_ty: Type = .fromInterned(try ip.getTupleType(gpa, io, pt.tid, .{
-                .types = &.{ arith_op_ty.toIntern(), arith_op_ty.toIntern() },
-                .values = &.{ .none, .none },
-            }));
-            const op_result_ty_id = try cg.resolveType(op_result_ty, .direct);
+            const op_result_ty_id = try cg.structType(
+                &.{ arith_op_ty_id, arith_op_ty_id },
+                null,
+                .none,
+            );
 
             const opcode: Opcode = switch (signedness) {
                 .signed => .OpSMulExtended,
@@ -3805,11 +3683,16 @@ fn buildWideMul(
         else => unreachable,
     }
 
-    const result_ty = try v.resultType(cg, lhs.ty);
-    return .{
-        v.finalize(result_ty, value_results),
-        v.finalize(result_ty, overflow_results),
+    result.value = switch (result.shape) {
+        .scalar, .vector => .{ .singleton = value_results.at(0) },
+        .unrolled => .{ .exploded_vector = value_results },
     };
+    var overflow = result;
+    overflow.value = switch (result.shape) {
+        .scalar, .vector => .{ .singleton = overflow_results.at(0) },
+        .unrolled => .{ .exploded_vector = overflow_results },
+    };
+    return .{ result, overflow };
 }
 
 /// The SPIR-V backend is not yet advanced enough to support the std testing infrastructure.
@@ -3819,30 +3702,24 @@ fn intFromBool(cg: *CodeGen, value: Temporary, result_ty: Type) !Temporary {
 
     return try cg.buildSelect(
         value,
-        Temporary.init(result_ty, one_id),
-        Temporary.init(result_ty, zero_id),
+        cg.temporary(result_ty, one_id),
+        cg.temporary(result_ty, zero_id),
     );
 }
 
 /// Convert representation from indirect (in memory) to direct (in 'register')
 /// This converts the argument type from resolveType(ty, .indirect) to resolveType(ty, .direct).
 fn convertToDirect(cg: *CodeGen, ty: Type, operand_id: Id) !Id {
-    const pt = cg.pt;
     const zcu = cg.zcu;
     switch (ty.scalarType(zcu).zigTypeTag(zcu)) {
         .bool => {
             const false_id = try cg.constBool(false, .indirect);
-            const operand_ty = blk: {
-                if (!ty.isVector(zcu)) break :blk Type.u1;
-                break :blk try pt.vectorType(.{
-                    .len = ty.vectorLen(zcu),
-                    .child = .u1_type,
-                });
-            };
+            var operand = cg.temporary(ty, operand_id);
+            operand.scalar_ty = .u1;
 
             const result = try cg.buildCmp(
                 .OpINotEqual,
-                Temporary.init(operand_ty, operand_id),
+                operand,
                 Temporary.init(.u1, false_id),
             );
             return try result.materialize(cg);
@@ -3857,7 +3734,7 @@ fn convertToIndirect(cg: *CodeGen, ty: Type, operand_id: Id) !Id {
     const zcu = cg.zcu;
     switch (ty.scalarType(zcu).zigTypeTag(zcu)) {
         .bool => {
-            const result = try cg.intFromBool(.init(ty, operand_id), .u1);
+            const result = try cg.intFromBool(cg.temporary(ty, operand_id), .u1);
             return try result.materialize(cg);
         },
         else => return operand_id,
@@ -4132,8 +4009,8 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) Error!void {
 
 fn airBinOpSimple(cg: *CodeGen, inst: Air.Inst.Index, op: Opcode) !?Id {
     const bin_op = cg.air.instructions.items(.data)[@backingInt(inst)].bin_op;
-    const lhs = try cg.temporary(bin_op.lhs);
-    const rhs = try cg.temporary(bin_op.rhs);
+    const lhs = cg.temporary(cg.typeOf(bin_op.lhs), try cg.resolve(bin_op.lhs));
+    const rhs = cg.temporary(cg.typeOf(bin_op.rhs), try cg.resolve(bin_op.rhs));
 
     const result = try cg.buildBinary(op, lhs, rhs);
     return try result.materialize(cg);
@@ -4154,11 +4031,11 @@ fn airArithOp(
     comptime uop: Opcode,
 ) !?Id {
     const bin_op = cg.air.instructions.items(.data)[@backingInt(inst)].bin_op;
-    const lhs = try cg.temporary(bin_op.lhs);
-    const rhs = try cg.temporary(bin_op.rhs);
-    const info = cg.arithmeticTypeInfo(lhs.ty);
-    const result = switch (info.class) {
-        .composite_integer => res: {
+    const lhs = cg.temporary(cg.typeOf(bin_op.lhs), try cg.resolve(bin_op.lhs));
+    const rhs = cg.temporary(cg.typeOf(bin_op.rhs), try cg.resolve(bin_op.rhs));
+    const info = cg.arithmeticTypeInfo(lhs.scalar_ty);
+    const result: Temporary = tmp: switch (info.class) {
+        .composite_integer => {
             const lhs_id = try lhs.materialize(cg);
             const rhs_id = try rhs.materialize(cg);
             const scratch_top = cg.id_scratch.items.len;
@@ -4172,14 +4049,14 @@ fn airArithOp(
                 else => return cg.todo("arith op for composite integers", .{}),
             };
             const normalized = try ci_result.normalize();
-            break :res Temporary.init(lhs.ty, try normalized.materialize(lhs.ty));
+            break :tmp .init(lhs.scalar_ty, try normalized.materialize(lhs.scalar_ty));
         },
-        .integer, .strange_integer => res: {
+        .integer, .strange_integer => {
             const raw = switch (info.signedness) {
                 .signed => try cg.buildBinary(sop, lhs, rhs),
                 .unsigned => try cg.buildBinary(uop, lhs, rhs),
             };
-            break :res try cg.normalize(raw, info);
+            break :tmp try cg.normalize(raw, info);
         },
         .float => try cg.buildBinary(fop, lhs, rhs),
         .bool => unreachable,
@@ -4238,9 +4115,9 @@ const MinMax = enum {
 
 fn airDivTrunc(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const bin_op = cg.air.instructions.items(.data)[@backingInt(inst)].bin_op;
-    const lhs = try cg.temporary(bin_op.lhs);
-    const rhs = try cg.temporary(bin_op.rhs);
-    const info = cg.arithmeticTypeInfo(lhs.ty);
+    const lhs = cg.temporary(cg.typeOf(bin_op.lhs), try cg.resolve(bin_op.lhs));
+    const rhs = cg.temporary(cg.typeOf(bin_op.rhs), try cg.resolve(bin_op.rhs));
+    const info = cg.arithmeticTypeInfo(lhs.scalar_ty);
     switch (info.class) {
         .composite_integer => return cg.todo("div_trunc for composite integers", .{}),
         .integer, .strange_integer => switch (info.signedness) {
@@ -4265,18 +4142,19 @@ fn airDivTrunc(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
 fn minMax(cg: *CodeGen, lhs: Temporary, rhs: Temporary, op: MinMax) !Temporary {
     const zcu = cg.zcu;
     const target = zcu.getTarget();
-    const info = cg.arithmeticTypeInfo(lhs.ty);
+    const info = cg.arithmeticTypeInfo(lhs.scalar_ty);
 
-    const v = cg.vectorization(.{ lhs, rhs });
-    const ops = v.components();
+    var result = lhs;
+    if (result.shape == .scalar) result.shape = rhs.shape;
+    const ops = result.instructionCount();
     const results = cg.allocIds(ops);
 
-    const op_result_ty = lhs.ty.scalarType(zcu);
-    const op_result_ty_id = try cg.resolveType(op_result_ty, .direct);
-    const result_ty = try v.resultType(cg, lhs.ty);
-
-    const op_lhs = try v.prepare(cg, lhs);
-    const op_rhs = try v.prepare(cg, rhs);
+    const op_result_ty_id = try cg.temporaryType(
+        result.scalar_ty,
+        if (result.shape == .unrolled) .scalar else result.shape,
+    );
+    const op_lhs = try lhs.transform(cg, result.shape);
+    const op_rhs = try rhs.transform(cg, result.shape);
 
     const set = try cg.importExtendedSet();
     const opcode = op.extInstOpcode(target, info);
@@ -4290,7 +4168,11 @@ fn minMax(cg: *CodeGen, lhs: Temporary, rhs: Temporary, op: MinMax) !Temporary {
         });
     }
 
-    return v.finalize(result_ty, results);
+    result.value = switch (result.shape) {
+        .scalar, .vector => .{ .singleton = results.at(0) },
+        .unrolled => .{ .exploded_vector = results },
+    };
+    return result;
 }
 
 /// This function normalizes values to a canonical representation
@@ -4303,7 +4185,7 @@ fn minMax(cg: *CodeGen, lhs: Temporary, rhs: Temporary, op: MinMax) !Temporary {
 /// wrapping easier to use in generic operations).
 fn normalize(cg: *CodeGen, value: Temporary, info: ArithmeticTypeInfo) !Temporary {
     const zcu = cg.zcu;
-    const ty = value.ty;
+    const ty = value.scalar_ty;
     switch (info.class) {
         .integer, .bool, .float => return value,
         .composite_integer => {
@@ -4334,11 +4216,9 @@ fn normalize(cg: *CodeGen, value: Temporary, info: ArithmeticTypeInfo) !Temporar
 
 fn airDivFloor(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const bin_op = cg.air.instructions.items(.data)[@backingInt(inst)].bin_op;
-
-    const lhs = try cg.temporary(bin_op.lhs);
-    const rhs = try cg.temporary(bin_op.rhs);
-
-    const info = cg.arithmeticTypeInfo(lhs.ty);
+    const lhs = cg.temporary(cg.typeOf(bin_op.lhs), try cg.resolve(bin_op.lhs));
+    const rhs = cg.temporary(cg.typeOf(bin_op.rhs), try cg.resolve(bin_op.rhs));
+    const info = cg.arithmeticTypeInfo(lhs.scalar_ty);
     switch (info.class) {
         .composite_integer => return cg.todo("div_floor for composite integers", .{}),
         .integer, .strange_integer => {
@@ -4356,12 +4236,12 @@ fn airDivFloor(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
 
             const div = try cg.buildBinary(.OpSDiv, lhs, rhs);
             const rem = try cg.buildBinary(.OpSRem, lhs, rhs);
-            const zero: Temporary = .init(lhs.ty, try cg.constInt(lhs.ty, 0));
+            const zero: Temporary = .init(lhs.scalar_ty, try cg.constInt(lhs.scalar_ty, 0));
             const rem_non_zero = try cg.buildCmp(.OpINotEqual, rem, zero);
             const lhs_rhs_xor = try cg.buildBinary(.OpBitwiseXor, lhs, rhs);
             const signs_differ = try cg.buildCmp(.OpSLessThan, lhs_rhs_xor, zero);
             const adjust = try cg.buildBinary(.OpLogicalAnd, rem_non_zero, signs_differ);
-            const result = try cg.buildBinary(.OpISub, div, try cg.intFromBool(adjust, div.ty));
+            const result = try cg.buildBinary(.OpISub, div, try cg.intFromBool(adjust, div.scalar_ty));
             return try result.materialize(cg);
         },
         .float => {
@@ -4405,10 +4285,8 @@ fn airPtrSub(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
 
 fn airMinMax(cg: *CodeGen, inst: Air.Inst.Index, op: MinMax) !?Id {
     const bin_op = cg.air.instructions.items(.data)[@backingInt(inst)].bin_op;
-
-    const lhs = try cg.temporary(bin_op.lhs);
-    const rhs = try cg.temporary(bin_op.rhs);
-
+    const lhs = cg.temporary(cg.typeOf(bin_op.lhs), try cg.resolve(bin_op.lhs));
+    const rhs = cg.temporary(cg.typeOf(bin_op.rhs), try cg.resolve(bin_op.rhs));
     const result = try cg.minMax(lhs, rhs, op);
     return try result.materialize(cg);
 }
@@ -4430,11 +4308,10 @@ fn airAddSubOverflow(
 
     const ty_pl = cg.air.instructions.items(.data)[@backingInt(inst)].ty_pl;
     const extra = cg.air.extraData(Air.Bin, ty_pl.payload).data;
-    const lhs = try cg.temporary(extra.lhs);
-    const rhs = try cg.temporary(extra.rhs);
+    const lhs = cg.temporary(cg.typeOf(extra.lhs), try cg.resolve(extra.lhs));
+    const rhs = cg.temporary(cg.typeOf(extra.rhs), try cg.resolve(extra.rhs));
     const result_ty = cg.typeOfIndex(inst);
-
-    const info = cg.arithmeticTypeInfo(lhs.ty);
+    const info = cg.arithmeticTypeInfo(lhs.scalar_ty);
     switch (info.class) {
         .composite_integer => {
             const lhs_id = try lhs.materialize(cg);
@@ -4445,7 +4322,7 @@ fn airAddSubOverflow(
             const ci_rhs = try CompositeInt.init(cg, rhs_id, info);
             const ci_sum = if (add == .OpIAdd) try ci_lhs.addSub(ci_rhs, true) else try ci_lhs.addSub(ci_rhs, false);
             const ci_result = try ci_sum.normalize();
-            const result_val_id = try ci_result.materialize(lhs.ty);
+            const result_val_id = try ci_result.materialize(lhs.scalar_ty);
 
             const ov_bool = switch (info.signedness) {
                 .unsigned => blk: {
@@ -4522,7 +4399,7 @@ fn airAddSubOverflow(
             // For subtraction (a - b), overflow occurs if the operands have different signs
             // and the result's sign is different from the minuend's (a's) sign.
             //   (sign(a) != sign(b)) && (sign(a) != sign(result))
-            const zero: Temporary = .init(rhs.ty, try cg.constInt(rhs.ty, 0));
+            const zero: Temporary = .init(rhs.scalar_ty, try cg.constInt(rhs.scalar_ty, 0));
             const lhs_is_neg = try cg.buildCmp(.OpSLessThan, lhs, zero);
             const rhs_is_neg = try cg.buildCmp(.OpSLessThan, rhs, zero);
             const result_is_neg = try cg.buildCmp(.OpSLessThan, result, zero);
@@ -4547,11 +4424,11 @@ fn airMulOverflow(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const gpa = cg.gpa;
     const ty_pl = cg.air.instructions.items(.data)[@backingInt(inst)].ty_pl;
     const extra = cg.air.extraData(Air.Bin, ty_pl.payload).data;
-    const lhs = try cg.temporary(extra.lhs);
-    const rhs = try cg.temporary(extra.rhs);
+    const lhs = cg.temporary(cg.typeOf(extra.lhs), try cg.resolve(extra.lhs));
+    const rhs = cg.temporary(cg.typeOf(extra.rhs), try cg.resolve(extra.rhs));
     const result_ty = cg.typeOfIndex(inst);
 
-    const info = cg.arithmeticTypeInfo(lhs.ty);
+    const info = cg.arithmeticTypeInfo(lhs.scalar_ty);
     switch (info.class) {
         .composite_integer => {
             const lhs_id = try lhs.materialize(cg);
@@ -4563,7 +4440,7 @@ fn airMulOverflow(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
 
             const low_limbs = try ci_lhs.mul(ci_rhs, false);
             const ci_result = try CompositeInt.fromLimbs(cg, low_limbs, info).normalize();
-            const result_val_id = try ci_result.materialize(lhs.ty);
+            const result_val_id = try ci_result.materialize(lhs.scalar_ty);
 
             const ci_lhs2 = try CompositeInt.init(cg, lhs_id, info);
             const ci_rhs2 = try CompositeInt.init(cg, rhs_id, info);
@@ -4746,13 +4623,13 @@ fn airMulOverflow(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
                 const casted_lhs = try cg.buildConvert(op_ty, lhs);
                 const casted_rhs = try cg.buildConvert(op_ty, rhs);
                 const full_result = try cg.buildBinary(.OpIMul, casted_lhs, casted_rhs);
-                const low_bits = try cg.buildConvert(lhs.ty, full_result);
+                const low_bits = try cg.buildConvert(lhs.scalar_ty, full_result);
                 const result = try cg.normalize(low_bits, info);
                 // Shift the result bits away to get the overflow bits.
-                const shift: Temporary = .init(full_result.ty, try cg.constInt(full_result.ty, info.bits));
+                const shift: Temporary = .init(full_result.scalar_ty, try cg.constInt(full_result.scalar_ty, info.bits));
                 const overflow = try cg.buildBinary(.OpShiftRightLogical, full_result, shift);
                 // Directly check if its zero in the op_ty without converting first.
-                const zero: Temporary = .init(full_result.ty, try cg.constInt(full_result.ty, 0));
+                const zero: Temporary = .init(full_result.scalar_ty, try cg.constInt(full_result.scalar_ty, 0));
                 const overflowed = try cg.buildCmp(.OpINotEqual, zero, overflow);
                 break :blk .{ result, overflowed };
             }
@@ -4765,14 +4642,14 @@ fn airMulOverflow(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
             // Overflow happened if the high-bits of the result are non-zero OR if the
             // high bits of the low word of the result (those outside the range of the
             // int) are nonzero.
-            const zero: Temporary = .init(lhs.ty, try cg.constInt(lhs.ty, 0));
+            const zero: Temporary = .init(lhs.scalar_ty, try cg.constInt(lhs.scalar_ty, 0));
             const high_overflowed = try cg.buildCmp(.OpINotEqual, zero, high_bits);
 
             // If no overflow bits in low_bits, no extra work needs to be done.
             if (info.backing_bits == info.bits) break :blk .{ result, high_overflowed };
 
             // Shift the result bits away to get the overflow bits.
-            const shift: Temporary = .init(lhs.ty, try cg.constInt(lhs.ty, info.bits));
+            const shift: Temporary = .init(lhs.scalar_ty, try cg.constInt(lhs.scalar_ty, info.bits));
             const low_overflow = try cg.buildBinary(.OpShiftRightLogical, low_bits, shift);
             const low_overflowed = try cg.buildCmp(.OpINotEqual, zero, low_overflow);
 
@@ -4791,7 +4668,7 @@ fn airMulOverflow(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
             // overflow should be -1 when
             //   (lhs > 0 && rhs < 0) || (lhs < 0 && rhs > 0)
 
-            const zero: Temporary = .init(lhs.ty, try cg.constInt(lhs.ty, 0));
+            const zero: Temporary = .init(lhs.scalar_ty, try cg.constInt(lhs.scalar_ty, 0));
             const lhs_negative = try cg.buildCmp(.OpSLessThan, lhs, zero);
             const rhs_negative = try cg.buildCmp(.OpSLessThan, rhs, zero);
             const lhs_positive = try cg.buildCmp(.OpSGreaterThan, lhs, zero);
@@ -4813,20 +4690,20 @@ fn airMulOverflow(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
                 const full_result = try cg.buildBinary(.OpIMul, casted_lhs, casted_rhs);
 
                 // Truncate to the result type.
-                const low_bits = try cg.buildConvert(lhs.ty, full_result);
+                const low_bits = try cg.buildConvert(lhs.scalar_ty, full_result);
                 const result = try cg.normalize(low_bits, info);
 
                 // Now, we need to check the overflow bits AND the sign
                 // bit for the expected overflow bits.
                 // To do that, shift out everything bit the sign bit and
                 // then check what remains.
-                const shift: Temporary = .init(full_result.ty, try cg.constInt(full_result.ty, info.bits - 1));
+                const shift: Temporary = .init(full_result.scalar_ty, try cg.constInt(full_result.scalar_ty, info.bits - 1));
                 // Use SRA so that any sign bits are duplicated. Now we can just check if ALL bits are set
                 // for negative cases.
                 const overflow = try cg.buildBinary(.OpShiftRightArithmetic, full_result, shift);
 
-                const long_all_set: Temporary = .init(full_result.ty, try cg.constInt(full_result.ty, -1));
-                const long_zero: Temporary = .init(full_result.ty, try cg.constInt(full_result.ty, 0));
+                const long_all_set: Temporary = .init(full_result.scalar_ty, try cg.constInt(full_result.scalar_ty, -1));
+                const long_zero: Temporary = .init(full_result.scalar_ty, try cg.constInt(full_result.scalar_ty, 0));
                 const mask = try cg.buildSelect(expected_overflow_bit, long_all_set, long_zero);
 
                 const overflowed = try cg.buildCmp(.OpINotEqual, mask, overflow);
@@ -4839,7 +4716,7 @@ fn airMulOverflow(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
             // Truncate result if required.
             const result = try cg.normalize(low_bits, info);
 
-            const all_set: Temporary = .init(lhs.ty, try cg.constInt(lhs.ty, -1));
+            const all_set: Temporary = .init(lhs.scalar_ty, try cg.constInt(lhs.scalar_ty, -1));
             const mask = try cg.buildSelect(expected_overflow_bit, all_set, zero);
 
             // Like with unsigned, overflow happened if high_bits are not the ones we expect,
@@ -4853,7 +4730,7 @@ fn airMulOverflow(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
             if (info.backing_bits == info.bits + 1) break :blk .{ result, high_overflowed };
 
             // Shift the result bits away to get the overflow bits.
-            const shift: Temporary = .init(lhs.ty, try cg.constInt(lhs.ty, info.bits - 1));
+            const shift: Temporary = .init(lhs.scalar_ty, try cg.constInt(lhs.scalar_ty, info.bits - 1));
             // Use SRA so that any sign bits are duplicated. Now we can just check if ALL bits are set
             // for negative cases.
             const low_overflow = try cg.buildBinary(.OpShiftRightArithmetic, low_bits, shift);
@@ -4872,17 +4749,12 @@ fn airMulOverflow(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
 }
 
 fn airShlOverflow(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
-    const zcu = cg.zcu;
-
     const ty_pl = cg.air.instructions.items(.data)[@backingInt(inst)].ty_pl;
     const extra = cg.air.extraData(Air.Bin, ty_pl.payload).data;
-
-    const base = try cg.temporary(extra.lhs);
-    const shift = try cg.temporary(extra.rhs);
-
+    const base = cg.temporary(cg.typeOf(extra.lhs), try cg.resolve(extra.lhs));
+    const shift = cg.temporary(cg.typeOf(extra.rhs), try cg.resolve(extra.rhs));
     const result_ty = cg.typeOfIndex(inst);
-
-    const info = cg.arithmeticTypeInfo(base.ty);
+    const info = cg.arithmeticTypeInfo(base.scalar_ty);
     switch (info.class) {
         .composite_integer => return cg.todo("shl-with-overflow for composite integers", .{}),
         .integer, .strange_integer => {},
@@ -4891,19 +4763,15 @@ fn airShlOverflow(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
 
     // Sometimes Zig doesn't make both of the arguments the same types here. SPIR-V expects that,
     // so just manually upcast it if required.
-    const casted_shift = try cg.buildConvert(base.ty.scalarType(zcu), shift);
-
+    const casted_shift = try cg.buildConvert(base.scalar_ty, shift);
     const left = try cg.buildBinary(.OpShiftLeftLogical, base, casted_shift);
     const result = try cg.normalize(left, info);
-
     const right = switch (info.signedness) {
         .unsigned => try cg.buildBinary(.OpShiftRightLogical, result, casted_shift),
         .signed => try cg.buildBinary(.OpShiftRightArithmetic, result, casted_shift),
     };
-
     const overflowed = try cg.buildCmp(.OpINotEqual, base, right);
     const ov = try cg.intFromBool(overflowed, .u1);
-
     const result_ty_id = try cg.resolveType(result_ty, .direct);
     return try cg.constructComposite(result_ty_id, &.{ try result.materialize(cg), try ov.materialize(cg) });
 }
@@ -5105,9 +4973,9 @@ fn airAssembly(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
 
 fn airBitwiseOp(cg: *CodeGen, inst: Air.Inst.Index, op: BitwiseOp) !?Id {
     const bin_op = cg.air.instructions.items(.data)[@backingInt(inst)].bin_op;
-    const lhs = try cg.temporary(bin_op.lhs);
-    const rhs = try cg.temporary(bin_op.rhs);
-    const info = cg.arithmeticTypeInfo(lhs.ty);
+    const lhs = cg.temporary(cg.typeOf(bin_op.lhs), try cg.resolve(bin_op.lhs));
+    const rhs = cg.temporary(cg.typeOf(bin_op.rhs), try cg.resolve(bin_op.rhs));
+    const info = cg.arithmeticTypeInfo(lhs.scalar_ty);
 
     // SPIR-V requires logical opcodes for booleans, bitwise opcodes for integers.
     const opcode: Opcode = switch (info.class) {
@@ -5135,7 +5003,7 @@ fn airBitwiseOp(cg: *CodeGen, inst: Air.Inst.Index, op: BitwiseOp) !?Id {
             const ci_lhs = try CompositeInt.init(cg, lhs_id, info);
             const ci_rhs = try CompositeInt.init(cg, rhs_id, info);
             const ci_result = try ci_lhs.bitwiseOp(ci_rhs, spv_opcode);
-            return try ci_result.materialize(lhs.ty);
+            return try ci_result.materialize(lhs.scalar_ty);
         },
     };
 
@@ -5144,18 +5012,14 @@ fn airBitwiseOp(cg: *CodeGen, inst: Air.Inst.Index, op: BitwiseOp) !?Id {
 }
 
 fn airShift(cg: *CodeGen, inst: Air.Inst.Index, unsigned: Opcode, signed: Opcode) !?Id {
-    const zcu = cg.zcu;
     const bin_op = cg.air.instructions.items(.data)[@backingInt(inst)].bin_op;
-
-    const base = try cg.temporary(bin_op.lhs);
-    const shift = try cg.temporary(bin_op.rhs);
-
+    const base = cg.temporary(cg.typeOf(bin_op.lhs), try cg.resolve(bin_op.lhs));
+    const shift = cg.temporary(cg.typeOf(bin_op.rhs), try cg.resolve(bin_op.rhs));
     const result_ty = cg.typeOfIndex(inst);
-
     const info = cg.arithmeticTypeInfo(result_ty);
     switch (info.class) {
         .composite_integer => {
-            const shift_info = cg.arithmeticTypeInfo(shift.ty);
+            const shift_info = cg.arithmeticTypeInfo(shift.scalar_ty);
             const limb_ty = cg.limbType();
             const shift_amt_id = switch (shift_info.class) {
                 .composite_integer => blk: {
@@ -5198,23 +5062,20 @@ fn airShift(cg: *CodeGen, inst: Air.Inst.Index, unsigned: Opcode, signed: Opcode
     // Note: The sign may differ here between the shift and the base type, in case
     // of an arithmetic right shift. SPIR-V still expects the same type,
     // so in that case we have to cast convert to signed.
-    const casted_shift = try cg.buildConvert(base.ty.scalarType(zcu), shift);
-
+    const casted_shift = try cg.buildConvert(base.scalar_ty, shift);
     const shifted = switch (info.signedness) {
         .unsigned => try cg.buildBinary(unsigned, base, casted_shift),
         .signed => try cg.buildBinary(signed, base, casted_shift),
     };
-
     const result = try cg.normalize(shifted, info);
     return try result.materialize(cg);
 }
 
 fn airNot(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const ty_op = cg.air.instructions.items(.data)[@backingInt(inst)].ty_op;
-    const operand = try cg.temporary(ty_op.operand);
+    const operand = cg.temporary(cg.typeOf(ty_op.operand), try cg.resolve(ty_op.operand));
     const result_ty = cg.typeOfIndex(inst);
     const info = cg.arithmeticTypeInfo(result_ty);
-
     const result = switch (info.class) {
         .bool => try cg.buildUnary(.l_not, operand),
         .float => unreachable,
@@ -5225,14 +5086,13 @@ fn airNot(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
             const ci = try CompositeInt.init(cg, op_id, info);
             const notted = try ci.bitwiseNot();
             const normalized = try notted.normalize();
-            break :blk Temporary.init(result_ty, try normalized.materialize(result_ty));
+            break :blk cg.temporary(result_ty, try normalized.materialize(result_ty));
         },
         .strange_integer, .integer => blk: {
             const complement = try cg.buildUnary(.bit_not, operand);
             break :blk try cg.normalize(complement, info);
         },
     };
-
     return try result.materialize(cg);
 }
 
@@ -5241,7 +5101,7 @@ fn airBitCast(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const operand_ty = cg.typeOf(ty_op.operand);
     const result_ty = cg.typeOfIndex(inst);
     if (operand_ty.toIntern() == .bool_type) {
-        const operand = try cg.temporary(ty_op.operand);
+        const operand = cg.temporary(cg.typeOf(ty_op.operand), try cg.resolve(ty_op.operand));
         const result = try cg.intFromBool(operand, .u1);
         return try result.materialize(cg);
     }
@@ -5423,14 +5283,14 @@ fn cmp(
     const gpa = cg.gpa;
     const pt = cg.pt;
     const zcu = cg.zcu;
-    const scalar_ty = lhs.ty.scalarType(zcu);
-    const is_vector = lhs.ty.isVector(zcu);
+    const scalar_ty = lhs.scalar_ty;
+    const is_vector = lhs.shape != .scalar;
 
     switch (scalar_ty.zigTypeTag(zcu)) {
         .int, .bool, .float => {},
         .@"enum" => {
             assert(!is_vector);
-            const ty = lhs.ty.backingIntType(zcu);
+            const ty = lhs.scalar_ty.backingIntType(zcu);
             return try cg.cmp(op, lhs.pun(ty), rhs.pun(ty));
         },
         .@"struct" => {
@@ -5472,8 +5332,7 @@ fn cmp(
         .optional => {
             assert(!is_vector);
 
-            const ty = lhs.ty;
-
+            const ty = lhs.scalar_ty;
             const payload_ty = ty.optionalChild(zcu);
             if (ty.optionalReprIsPayload(zcu)) {
                 assert(payload_ty.hasRuntimeBits(zcu));
@@ -5519,9 +5378,8 @@ fn cmp(
 
             const lhs_pl_id = try cg.extractField(payload_ty, lhs_id, 0);
             const rhs_pl_id = try cg.extractField(payload_ty, rhs_id, 0);
-
-            const lhs_pl: Temporary = .init(payload_ty, lhs_pl_id);
-            const rhs_pl: Temporary = .init(payload_ty, rhs_pl_id);
+            const lhs_pl: Temporary = cg.temporary(payload_ty, lhs_pl_id);
+            const rhs_pl: Temporary = cg.temporary(payload_ty, rhs_pl_id);
 
             return switch (op) {
                 .eq => try cg.buildBinary(
@@ -5660,13 +5518,10 @@ fn airCall(cg: *CodeGen, inst: Air.Inst.Index, modifier: std.lang.CallModifier) 
 fn airClzCtz(cg: *CodeGen, inst: Air.Inst.Index, op: UnaryOp) !?Id {
     if (cg.liveness.isUnused(inst)) return null;
 
-    const zcu = cg.zcu;
     const ty_op = cg.air.instructions.items(.data)[@backingInt(inst)].ty_op;
-    const operand = try cg.temporary(ty_op.operand);
-
-    const scalar_result_ty = cg.typeOfIndex(inst).scalarType(zcu);
-
-    const info = cg.arithmeticTypeInfo(operand.ty);
+    const operand = cg.temporary(cg.typeOf(ty_op.operand), try cg.resolve(ty_op.operand));
+    const result_ty = cg.typeOfIndex(inst);
+    const info = cg.arithmeticTypeInfo(operand.scalar_ty);
     switch (info.class) {
         .composite_integer => return cg.todo("@clz/@ctz for composite integers", .{}),
         .integer, .strange_integer => {},
@@ -5674,11 +5529,7 @@ fn airClzCtz(cg: *CodeGen, inst: Air.Inst.Index, op: UnaryOp) !?Id {
     }
 
     const count = try cg.buildUnary(op, operand);
-
-    // Result of OpenCL ctz/clz returns operand.ty, and we want result_ty.
-    // result_ty is always large enough to hold the result, so we might have to down
-    // cast it.
-    const result = try cg.buildConvert(scalar_result_ty, count);
+    const result = try cg.buildConvert(result_ty, count);
     return try result.materialize(cg);
 }
 
@@ -5819,7 +5670,7 @@ fn bitCast(
     // should we change the representation of strange integers?
     if (dst_ty.zigTypeTag(zcu) == .int) {
         const info = cg.arithmeticTypeInfo(dst_ty);
-        const result = try cg.normalize(Temporary.init(dst_ty, result_id), info);
+        const result = try cg.normalize(cg.temporary(dst_ty, result_id), info);
         return try result.materialize(cg);
     }
 
@@ -5828,7 +5679,7 @@ fn bitCast(
 
 fn airUnOpSimple(cg: *CodeGen, inst: Air.Inst.Index, op: UnaryOp) !?Id {
     const un_op = cg.air.instructions.items(.data)[@backingInt(inst)].un_op;
-    const operand = try cg.temporary(un_op);
+    const operand = cg.temporary(cg.typeOf(un_op), try cg.resolve(un_op));
     const result = try cg.buildUnary(op, operand);
     return try result.materialize(cg);
 }
@@ -5837,17 +5688,17 @@ fn airAbs(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const zcu = cg.zcu;
     const target = zcu.getTarget();
     const ty_op = cg.air.instructions.items(.data)[@backingInt(inst)].ty_op;
-    const value = try cg.temporary(ty_op.operand);
+    const value = cg.temporary(cg.typeOf(ty_op.operand), try cg.resolve(ty_op.operand));
     // Note: operand_ty may be signed, while ty is always unsigned.
     const result_ty = cg.typeOfIndex(inst);
-    const operand_info = cg.arithmeticTypeInfo(value.ty);
-    const result: Temporary = switch (operand_info.class) {
+    const operand_info = cg.arithmeticTypeInfo(value.scalar_ty);
+    const result: Temporary = tmp: switch (operand_info.class) {
         .float => try cg.buildUnary(.f_abs, value),
-        .integer, .strange_integer => abs: {
+        .integer, .strange_integer => {
             var abs_value = try cg.buildUnary(.i_abs, value);
             switch (target.os.tag) {
                 .vulkan, .opengl => {
-                    if (value.ty.intInfo(zcu).signedness == .signed) {
+                    if (value.scalar_ty.intInfo(zcu).signedness == .signed) {
                         const abs_id = try abs_value.materialize(cg);
                         const dst_ty_id = try cg.resolveType(result_ty, .direct);
                         const cast_id = cg.allocId();
@@ -5856,14 +5707,14 @@ fn airAbs(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
                             .id_result = cast_id,
                             .operand = abs_id,
                         });
-                        abs_value = .init(result_ty, cast_id);
+                        abs_value = cg.temporary(result_ty, cast_id);
                     }
                 },
                 else => {},
             }
-            break :abs try cg.normalize(abs_value, cg.arithmeticTypeInfo(result_ty));
+            break :tmp try cg.normalize(abs_value, cg.arithmeticTypeInfo(result_ty));
         },
-        .composite_integer => abs: {
+        .composite_integer => {
             const val_id = try value.materialize(cg);
             const scratch_top = cg.id_scratch.items.len;
             defer cg.id_scratch.shrinkRetainingCapacity(scratch_top);
@@ -5886,7 +5737,7 @@ fn airAbs(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
             }
             const ci_result = CompositeInt.fromLimbs(cg, result_limbs, result_info);
             const normalized = try ci_result.normalize();
-            break :abs .init(result_ty, try normalized.materialize(result_ty));
+            break :tmp cg.temporary(result_ty, try normalized.materialize(result_ty));
         },
         .bool => unreachable,
     };
@@ -5910,9 +5761,8 @@ fn airCmp(
     comptime op: std.math.CompareOperator,
 ) !?Id {
     const bin_op = cg.air.instructions.items(.data)[@backingInt(inst)].bin_op;
-    const lhs = try cg.temporary(bin_op.lhs);
-    const rhs = try cg.temporary(bin_op.rhs);
-
+    const lhs = cg.temporary(cg.typeOf(bin_op.lhs), try cg.resolve(bin_op.lhs));
+    const rhs = cg.temporary(cg.typeOf(bin_op.rhs), try cg.resolve(bin_op.rhs));
     const result = try cg.cmp(op, lhs, rhs);
     return try result.materialize(cg);
 }
@@ -5920,10 +5770,9 @@ fn airCmp(
 fn airVectorCmp(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const ty_pl = cg.air.instructions.items(.data)[@backingInt(inst)].ty_pl;
     const vec_cmp = cg.air.extraData(Air.VectorCmp, ty_pl.payload).data;
-    const lhs = try cg.temporary(vec_cmp.lhs);
-    const rhs = try cg.temporary(vec_cmp.rhs);
+    const lhs = cg.temporary(cg.typeOf(vec_cmp.lhs), try cg.resolve(vec_cmp.lhs));
+    const rhs = cg.temporary(cg.typeOf(vec_cmp.rhs), try cg.resolve(vec_cmp.rhs));
     const op = vec_cmp.compareOperator();
-
     const result = try cg.cmp(op, lhs, rhs);
     return try result.materialize(cg);
 }
@@ -5934,10 +5783,8 @@ fn airCondBr(cg: *CodeGen, inst: Air.Inst.Index) !void {
     const then_body = cond_br.then_body;
     const else_body = cond_br.else_body;
     const condition_id = try cg.resolve(cond_br.condition);
-
     const then_label = cg.allocId();
     const else_label = cg.allocId();
-
     const merge_label = cg.allocId();
 
     try cg.body.emit(gpa, .OpSelectionMerge, .{
@@ -6053,7 +5900,7 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index) !void {
             const label = case_labels.at(case.idx);
 
             for (case.items) |item| {
-                const int_lit = cg.literalInt(cond_ty, cond_words, item);
+                const int_lit = cg.switchLiteralInt(cond_ty, cond_words, item);
                 cg.body.writeOperand(spec.LiteralContextDependentNumber, int_lit);
                 cg.body.writeOperand(Id, label);
             }
@@ -6082,7 +5929,7 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index) !void {
             var case_cond: ?Id = null;
 
             for (case.items) |item| {
-                const item_tmp: Temporary = try cg.temporary(item);
+                const item_tmp: Temporary = cg.temporary(cg.typeOf(item), try cg.resolve(item));
                 const eq = try (try cg.cmp(.eq, cond_tmp, item_tmp)).materialize(cg);
                 case_cond = if (case_cond) |prev| blk: {
                     const combined = cg.allocId();
@@ -6097,8 +5944,8 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index) !void {
             }
 
             for (case.ranges) |range| {
-                const lo_tmp: Temporary = try cg.temporary(range[0]);
-                const hi_tmp: Temporary = try cg.temporary(range[1]);
+                const lo_tmp: Temporary = cg.temporary(cg.typeOf(range[0]), try cg.resolve(range[0]));
+                const hi_tmp: Temporary = cg.temporary(cg.typeOf(range[1]), try cg.resolve(range[1]));
                 const ge = try (try cg.cmp(.gte, cond_tmp, lo_tmp)).materialize(cg);
                 const le = try (try cg.cmp(.lte, cond_tmp, hi_tmp)).materialize(cg);
                 const in_range = cg.allocId();
@@ -6284,7 +6131,7 @@ fn airLoopSwitchBr(cg: *CodeGen, inst: Air.Inst.Index) !void {
             const label = case_labels.at(case.idx);
 
             for (case.items) |item| {
-                const int_lit = cg.literalInt(cond_ty, cond_words, item);
+                const int_lit = cg.switchLiteralInt(cond_ty, cond_words, item);
                 cg.body.writeOperand(spec.LiteralContextDependentNumber, int_lit);
                 cg.body.writeOperand(Id, label);
             }
@@ -6308,7 +6155,7 @@ fn airLoopSwitchBr(cg: *CodeGen, inst: Air.Inst.Index) !void {
             var case_cond: ?Id = null;
 
             for (case.items) |item| {
-                const item_tmp: Temporary = try cg.temporary(item);
+                const item_tmp: Temporary = cg.temporary(cg.typeOf(item), try cg.resolve(item));
                 const eq = try (try cg.cmp(.eq, cond_tmp, item_tmp)).materialize(cg);
                 case_cond = if (case_cond) |prev| blk: {
                     const combined = cg.allocId();
@@ -6323,8 +6170,8 @@ fn airLoopSwitchBr(cg: *CodeGen, inst: Air.Inst.Index) !void {
             }
 
             for (case.ranges) |range| {
-                const lo_tmp: Temporary = try cg.temporary(range[0]);
-                const hi_tmp: Temporary = try cg.temporary(range[1]);
+                const lo_tmp: Temporary = cg.temporary(cg.typeOf(range[0]), try cg.resolve(range[0]));
+                const hi_tmp: Temporary = cg.temporary(cg.typeOf(range[1]), try cg.resolve(range[1]));
                 const ge = try (try cg.cmp(.gte, cond_tmp, lo_tmp)).materialize(cg);
                 const le = try (try cg.cmp(.lte, cond_tmp, hi_tmp)).materialize(cg);
                 const in_range = cg.allocId();
@@ -6447,6 +6294,36 @@ fn airSwitchDispatch(cg: *CodeGen, inst: Air.Inst.Index) !void {
     try cg.structuredBreak(loop_switch.continue_label);
 }
 
+/// Returns the OpSwitch literal int corresponding to ref (case of the switch)
+/// where ty is the type we switch on and words is the width of the literal
+/// (words = 1 means up to 32 bits, and 2 means 64 bits).
+fn switchLiteralInt(
+    cg: *CodeGen,
+    ty: Type,
+    words: u32,
+    ref: Air.Inst.Ref,
+) spec.LiteralContextDependentNumber {
+    const zcu = cg.zcu;
+    const is_enum = ty.zigTypeTag(zcu) == .@"enum";
+    const int_ty = if (is_enum) ty.backingIntType(zcu) else ty;
+    const case_value: Value = .fromInterned(ref.toInterned().?);
+    const value = if (is_enum) case_value.backingInt(zcu) else case_value;
+    const bits: u16 = switch (int_ty.zigTypeTag(zcu)) {
+        .int => cg.backingIntBits(int_ty.intInfo(zcu).bits).@"0",
+        else => @intCast(words * 32),
+    };
+    const int_val: u64 = switch (int_ty.zigTypeTag(zcu)) {
+        .int => if (int_ty.isSignedInt(zcu))
+            @bitCast(value.toSignedInt(zcu))
+        else
+            value.toUnsignedInt(zcu),
+        .bool, .pointer => value.toUnsignedInt(zcu),
+        .error_set => value.getErrorInt(zcu),
+        else => unreachable,
+    };
+    return cg.literalInt(bits, int_val);
+}
+
 fn airTry(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const gpa = cg.gpa;
     const zcu = cg.zcu;
@@ -6456,9 +6333,7 @@ fn airTry(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const err_union_id = try cg.resolve(unwrapped_try.error_union);
     const err_union_ty = cg.air.typeOf(unwrapped_try.error_union, &zcu.intern_pool);
     const payload_ty = cg.typeOfIndex(inst);
-
     const bool_ty_id = try cg.resolveType(.bool, .direct);
-
     const eu_layout = cg.errorUnionLayout(payload_ty);
 
     if (!err_union_ty.errorUnionSet(zcu).errorSetIsEmpty(zcu)) {
@@ -6702,13 +6577,13 @@ fn airLoad(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
         const field_int_ty = try pt.intType(signedness, elem_bit_size);
         const narrowed = if (ptr_info.packed_offset.bit_offset > 0) blk: {
             const bit_offset_id = try cg.constInt(host_int_ty, ptr_info.packed_offset.bit_offset);
-            const shifted = try cg.buildBinary(.OpShiftRightLogical, .{ .ty = host_int_ty, .value = .{ .singleton = host_val } }, .{ .ty = host_int_ty, .value = .{ .singleton = bit_offset_id } });
+            const shifted = try cg.buildBinary(.OpShiftRightLogical, .{ .scalar_ty = host_int_ty, .value = .{ .singleton = host_val } }, .{ .scalar_ty = host_int_ty, .value = .{ .singleton = bit_offset_id } });
             break :blk try shifted.materialize(cg);
         } else host_val;
         const result_id = blk: {
             if (cg.backingIntBits(elem_bit_size).@"0" == cg.backingIntBits(host_bits).@"0")
                 break :blk try cg.bitCast(field_int_ty, host_int_ty, narrowed);
-            const trunc = try cg.buildConvert(field_int_ty, .{ .ty = host_int_ty, .value = .{ .singleton = narrowed } });
+            const trunc = try cg.buildConvert(field_int_ty, .{ .scalar_ty = host_int_ty, .value = .{ .singleton = narrowed } });
             break :blk try trunc.materialize(cg);
         };
         if (elem_ty.ip_index == .bool_type) return try cg.convertToDirect(.bool, result_id);
@@ -6847,7 +6722,7 @@ fn airStore(cg: *CodeGen, inst: Air.Inst.Index) !void {
         const extended = blk: {
             if (cg.backingIntBits(elem_bit_size).@"0" == cg.backingIntBits(host_bits).@"0")
                 break :blk try cg.bitCast(host_int_ty, field_int_ty, value_as_int);
-            const conv = try cg.buildConvert(host_int_ty, .{ .ty = field_int_ty, .value = .{ .singleton = value_as_int } });
+            const conv = try cg.buildConvert(host_int_ty, .{ .scalar_ty = field_int_ty, .value = .{ .singleton = value_as_int } });
             break :blk try conv.materialize(cg);
         };
 
@@ -6856,9 +6731,9 @@ fn airStore(cg: *CodeGen, inst: Air.Inst.Index) !void {
         const host_mask = if (host_bits == 64) @as(u64, std.math.maxInt(u64)) else (@as(u64, 1) << @as(u6, @intCast(host_bits))) - 1;
         const clear_mask = ~(field_mask << @as(u6, @intCast(bit_offset))) & host_mask;
         const clear_mask_id = try cg.constInt(host_int_ty, clear_mask);
-        const cleared = try cg.buildBinary(.OpBitwiseAnd, .{ .ty = host_int_ty, .value = .{ .singleton = host_val } }, .{ .ty = host_int_ty, .value = .{ .singleton = clear_mask_id } });
+        const cleared = try cg.buildBinary(.OpBitwiseAnd, .{ .scalar_ty = host_int_ty, .value = .{ .singleton = host_val } }, .{ .scalar_ty = host_int_ty, .value = .{ .singleton = clear_mask_id } });
         const bit_offset_id = try cg.constInt(host_int_ty, bit_offset);
-        const shifted_val = try cg.buildBinary(.OpShiftLeftLogical, .{ .ty = host_int_ty, .value = .{ .singleton = extended } }, .{ .ty = host_int_ty, .value = .{ .singleton = bit_offset_id } });
+        const shifted_val = try cg.buildBinary(.OpShiftLeftLogical, .{ .scalar_ty = host_int_ty, .value = .{ .singleton = extended } }, .{ .scalar_ty = host_int_ty, .value = .{ .singleton = bit_offset_id } });
         const combined = try cg.buildBinary(.OpBitwiseOr, cleared, shifted_val);
         const combined_id = try combined.materialize(cg);
 
@@ -6885,7 +6760,7 @@ fn airStore(cg: *CodeGen, inst: Air.Inst.Index) !void {
 
 fn airFloatCast(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const ty_op = cg.air.instructions.items(.data)[@backingInt(inst)].ty_op;
-    const operand = try cg.temporary(ty_op.operand);
+    const operand = cg.temporary(cg.typeOf(ty_op.operand), try cg.resolve(ty_op.operand));
     const dest_ty = cg.typeOfIndex(inst);
     const result = try cg.buildConvert(dest_ty, operand);
     return try result.materialize(cg);
@@ -6893,12 +6768,10 @@ fn airFloatCast(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
 
 fn airIntCast(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const ty_op = cg.air.instructions.items(.data)[@backingInt(inst)].ty_op;
-    const src = try cg.temporary(ty_op.operand);
+    const src = cg.temporary(cg.typeOf(ty_op.operand), try cg.resolve(ty_op.operand));
     const dst_ty = cg.typeOfIndex(inst);
-
-    const src_info = cg.arithmeticTypeInfo(src.ty);
+    const src_info = cg.arithmeticTypeInfo(src.scalar_ty);
     const dst_info = cg.arithmeticTypeInfo(dst_ty);
-
     const src_composite = src_info.class == .composite_integer;
     const dst_composite = dst_info.class == .composite_integer;
 
@@ -7105,9 +6978,9 @@ fn airIntCast(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
 
     if (src_info.backing_bits == dst_info.backing_bits) {
         const result = if (dst_info.bits < src_info.bits)
-            try cg.normalize(src.pun(dst_ty), dst_info)
+            try cg.normalize(src.pun(dst_ty.scalarType(cg.zcu)), dst_info)
         else
-            src.pun(dst_ty);
+            src.pun(dst_ty.scalarType(cg.zcu));
         return try result.materialize(cg);
     }
 
@@ -7805,10 +7678,10 @@ fn airAggFieldVal(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
                 const signedness = if (field_ty.isInt(zcu)) field_ty.intInfo(zcu).signedness else .unsigned;
                 const field_bit_size: u16 = @intCast(field_ty.bitSize(zcu));
                 const field_int_ty = try pt.intType(signedness, field_bit_size);
-                const shift_lhs: Temporary = .{ .ty = object_ty, .value = .{ .singleton = object_id } };
-                const shift = try cg.buildBinary(.OpShiftRightLogical, shift_lhs, .{ .ty = object_ty, .value = .{ .singleton = bit_offset_id } });
+                const shift_lhs: Temporary = .{ .scalar_ty = object_ty, .value = .{ .singleton = object_id } };
+                const shift = try cg.buildBinary(.OpShiftRightLogical, shift_lhs, .{ .scalar_ty = object_ty, .value = .{ .singleton = bit_offset_id } });
                 const mask_id = try cg.constInt(object_ty, (@as(u64, 1) << @as(u6, @intCast(field_bit_size))) - 1);
-                const masked = try cg.buildBinary(.OpBitwiseAnd, shift, .{ .ty = object_ty, .value = .{ .singleton = mask_id } });
+                const masked = try cg.buildBinary(.OpBitwiseAnd, shift, .{ .scalar_ty = object_ty, .value = .{ .singleton = mask_id } });
                 const result_id = blk: {
                     if (cg.backingIntBits(field_bit_size).@"0" == struct_backing_int_bits)
                         break :blk try cg.bitCast(field_int_ty, object_ty, try masked.materialize(cg));
@@ -7830,8 +7703,8 @@ fn airAggFieldVal(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
                 const mask_id = try cg.constInt(backing_int_ty, (@as(u64, 1) << @as(u6, @intCast(field_bit_size))) - 1);
                 const masked = try cg.buildBinary(
                     .OpBitwiseAnd,
-                    .{ .ty = backing_int_ty, .value = .{ .singleton = object_id } },
-                    .{ .ty = backing_int_ty, .value = .{ .singleton = mask_id } },
+                    .{ .scalar_ty = backing_int_ty, .value = .{ .singleton = object_id } },
+                    .{ .scalar_ty = backing_int_ty, .value = .{ .singleton = mask_id } },
                 );
                 const result_id = blk: {
                     if (cg.backingIntBits(field_bit_size).@"0" == cg.backingIntBits(@intCast(backing_int_ty.bitSize(zcu))).@"0")
@@ -8077,7 +7950,7 @@ fn airArrayToSlice(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
 
 fn airIntFromFloat(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const ty_op = cg.air.instructions.items(.data)[@backingInt(inst)].ty_op;
-    const operand = try cg.temporary(ty_op.operand);
+    const operand = cg.temporary(cg.typeOf(ty_op.operand), try cg.resolve(ty_op.operand));
     const result_ty = cg.typeOfIndex(inst);
     const result = try cg.buildConvert(result_ty, operand);
     return try result.materialize(cg);
@@ -8085,7 +7958,7 @@ fn airIntFromFloat(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
 
 fn airFloatFromInt(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const ty_op = cg.air.instructions.items(.data)[@backingInt(inst)].ty_op;
-    const operand = try cg.temporary(ty_op.operand);
+    const operand = cg.temporary(cg.typeOf(ty_op.operand), try cg.resolve(ty_op.operand));
     const result_ty = cg.typeOfIndex(inst);
     const result = try cg.buildConvert(result_ty, operand);
     return try result.materialize(cg);
@@ -8229,10 +8102,9 @@ fn airShuffleTwo(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
 fn airSelect(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const pl_op = cg.air.instructions.items(.data)[@backingInt(inst)].pl_op;
     const extra = cg.air.extraData(Air.Bin, pl_op.payload).data;
-    const pred = try cg.temporary(pl_op.operand);
-    const a = try cg.temporary(extra.lhs);
-    const b = try cg.temporary(extra.rhs);
-
+    const pred = cg.temporary(cg.typeOf(pl_op.operand), try cg.resolve(pl_op.operand));
+    const a = cg.temporary(cg.typeOf(extra.lhs), try cg.resolve(extra.lhs));
+    const b = cg.temporary(cg.typeOf(extra.rhs), try cg.resolve(extra.rhs));
     const result = try cg.buildSelect(pred, a, b);
     return try result.materialize(cg);
 }
@@ -8301,16 +8173,16 @@ fn airAggregateInit(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
                     };
                     const shift_rhs = try cg.constInt(backing_int_ty, running_bits);
                     const extended_int_conv = try cg.buildConvert(backing_int_ty, .{
-                        .ty = field_int_ty,
+                        .scalar_ty = field_int_ty,
                         .value = .{ .singleton = field_int_id },
                     });
                     const shifted = try cg.buildBinary(.OpShiftLeftLogical, extended_int_conv, .{
-                        .ty = backing_int_ty,
+                        .scalar_ty = backing_int_ty,
                         .value = .{ .singleton = shift_rhs },
                     });
                     const running_int_tmp = try cg.buildBinary(
                         .OpBitwiseOr,
-                        .{ .ty = backing_int_ty, .value = .{ .singleton = running_int_id } },
+                        .{ .scalar_ty = backing_int_ty, .value = .{ .singleton = running_int_id } },
                         shifted,
                     );
                     running_int_id = try running_int_tmp.materialize(cg);
@@ -8417,9 +8289,9 @@ fn airMulAdd(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const pl_op = cg.air.instructions.items(.data)[@backingInt(inst)].pl_op;
     const extra = cg.air.extraData(Air.Bin, pl_op.payload).data;
 
-    const a = try cg.temporary(extra.lhs);
-    const b = try cg.temporary(extra.rhs);
-    const c = try cg.temporary(pl_op.operand);
+    const a = cg.temporary(cg.typeOf(extra.lhs), try cg.resolve(extra.lhs));
+    const b = cg.temporary(cg.typeOf(extra.rhs), try cg.resolve(extra.rhs));
+    const c = cg.temporary(cg.typeOf(pl_op.operand), try cg.resolve(pl_op.operand));
 
     const result_ty = cg.typeOfIndex(inst);
     const info = cg.arithmeticTypeInfo(result_ty);
@@ -8428,17 +8300,13 @@ fn airMulAdd(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
     const zcu = cg.zcu;
     const target = zcu.getTarget();
 
-    const v = cg.vectorization(.{ a, b, c });
-    const ops = v.components();
+    var result = a;
+    const ops = result.instructionCount();
     const results = cg.allocIds(ops);
-
-    const op_result_ty = a.ty.scalarType(zcu);
-    const op_result_ty_id = try cg.resolveType(op_result_ty, .direct);
-    const result_temp_ty = try v.resultType(cg, a.ty);
-
-    const op_a = try v.prepare(cg, a);
-    const op_b = try v.prepare(cg, b);
-    const op_c = try v.prepare(cg, c);
+    const op_result_ty_id = try cg.temporaryType(result.scalar_ty, if (result.shape == .unrolled) .scalar else result.shape);
+    const op_a = try a.transform(cg, result.shape);
+    const op_b = try b.transform(cg, result.shape);
+    const op_c = try c.transform(cg, result.shape);
 
     const set = try cg.importExtendedSet();
     const opcode: u32 = switch (target.os.tag) {
@@ -8459,7 +8327,10 @@ fn airMulAdd(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
         });
     }
 
-    const result = v.finalize(result_temp_ty, results);
+    result.value = switch (result.shape) {
+        .scalar, .vector => .{ .singleton = results.at(0) },
+        .unrolled => .{ .exploded_vector = results },
+    };
     return try result.materialize(cg);
 }
 
