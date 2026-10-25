@@ -350,8 +350,9 @@ fn genBody(self: *FuncGen, body: []const Air.Inst.Index, coverage_point: Air.Cov
             .legalize_vec_elem_val   => try self.airLegalizeVecElemVal(inst),
             .legalize_vec_store_elem => try self.airLegalizeVecStoreElem(inst),
 
-            // No soft float legalizations are enabled.
-            .legalize_compiler_rt_call => unreachable,
+            // No soft float legalizations are requested, but for testing we sometimes enable *all*
+            // legalizations in this backend (`-flegalize-all`), so we still need to handle this.
+            .legalize_compiler_rt_call => try self.airLegalizeCompilerRtCall(inst),
 
             .add            => try self.airAdd(inst, .normal),
             .add_optimized  => try self.airAdd(inst, .fast),
@@ -2288,6 +2289,48 @@ fn airLegalizeVecStoreElem(fg: *FuncGen, inst: Air.Inst.Index) Allocator.Error!B
     }
 
     return .none;
+}
+
+fn airLegalizeCompilerRtCall(fg: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
+    const zcu = fg.object.zcu;
+    const comp = zcu.comp;
+    const gpa = comp.gpa;
+    const target = comp.getTarget();
+    const builder = &fg.object.builder;
+
+    const compiler_rt_call = fg.air.unwrapCompilerRtCall(inst);
+
+    const param_types = try gpa.alloc(InternPool.Index, compiler_rt_call.args.len);
+    defer gpa.free(param_types);
+
+    const llvm_args = try gpa.alloc(Builder.Value, compiler_rt_call.args.len);
+    defer gpa.free(llvm_args);
+
+    for (param_types, llvm_args, compiler_rt_call.args) |*param_ty, *llvm_arg, arg_ref| {
+        param_ty.* = fg.typeOf(arg_ref).toIntern();
+        llvm_arg.* = try fg.resolveInst(arg_ref);
+    }
+
+    const fn_info: Object.FuncInfo = .{
+        .cc = compiler_rt_call.func.@"callconv"(target),
+        .param_types = param_types,
+        .return_type = compiler_rt_call.func.returnType().toIntern(),
+    };
+
+    const llvm_fn = try fg.object.getLibcFunction(
+        fg.pt,
+        try builder.strtabString(compiler_rt_call.func.name(target)),
+        fn_info,
+    );
+
+    return fg.buildCall(
+        .{},
+        llvm_fn.typeOf(builder),
+        llvm_fn.toValue(builder),
+        fn_info,
+        fn_info.param_types,
+        llvm_args,
+    );
 }
 
 fn airPtrElemVal(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
