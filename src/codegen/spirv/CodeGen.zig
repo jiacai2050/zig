@@ -6570,6 +6570,9 @@ fn airLoad(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
         ptr_info.flags.vector_index == .none)
     {
         const host_bits: u16 = ptr_info.packed_offset.host_size * 8;
+        if (cg.backingIntBits(host_bits).@"1") {
+            return cg.todo("packed field access with composite backing integers", .{});
+        }
         const elem_bit_size: u16 = @intCast(elem_ty.bitSize(zcu));
         const host_int_ty = try pt.intType(.unsigned, host_bits);
         const host_val = try cg.load(host_int_ty, operand_ptr_id, .{ .is_volatile = ptr_info.flags.is_volatile });
@@ -6584,7 +6587,8 @@ fn airLoad(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
             if (cg.backingIntBits(elem_bit_size).@"0" == cg.backingIntBits(host_bits).@"0")
                 break :blk try cg.bitCast(field_int_ty, host_int_ty, narrowed);
             const trunc = try cg.buildConvert(field_int_ty, .{ .scalar_ty = host_int_ty, .value = .{ .singleton = narrowed } });
-            break :blk try trunc.materialize(cg);
+            const normalized = try cg.normalize(trunc, cg.arithmeticTypeInfo(field_int_ty));
+            break :blk try normalized.materialize(cg);
         };
         if (elem_ty.ip_index == .bool_type) return try cg.convertToDirect(.bool, result_id);
         if (elem_ty.isInt(zcu)) return result_id;
@@ -6703,6 +6707,9 @@ fn airStore(cg: *CodeGen, inst: Air.Inst.Index) !void {
         ptr_info.flags.vector_index == .none)
     {
         const host_bits: u16 = ptr_info.packed_offset.host_size * 8;
+        if (cg.backingIntBits(host_bits).@"1") {
+            return cg.todo("packed field access with composite backing integers", .{});
+        }
         const host_int_ty = try pt.intType(.unsigned, host_bits);
         const host_val = try cg.load(host_int_ty, operand_ptr_id, .{ .is_volatile = ptr_info.flags.is_volatile });
         const elem_bit_size: u16 = @intCast(elem_ty.bitSize(zcu));
@@ -6727,13 +6734,19 @@ fn airStore(cg: *CodeGen, inst: Air.Inst.Index) !void {
         };
 
         const bit_offset = ptr_info.packed_offset.bit_offset;
-        const field_mask = (@as(u64, 1) << @as(u6, @intCast(elem_bit_size))) - 1;
+        const field_mask = @as(u64, std.math.maxInt(u64)) >> @as(u6, @intCast(64 - elem_bit_size));
         const host_mask = if (host_bits == 64) @as(u64, std.math.maxInt(u64)) else (@as(u64, 1) << @as(u6, @intCast(host_bits))) - 1;
         const clear_mask = ~(field_mask << @as(u6, @intCast(bit_offset))) & host_mask;
         const clear_mask_id = try cg.constInt(host_int_ty, clear_mask);
         const cleared = try cg.buildBinary(.OpBitwiseAnd, .{ .scalar_ty = host_int_ty, .value = .{ .singleton = host_val } }, .{ .scalar_ty = host_int_ty, .value = .{ .singleton = clear_mask_id } });
+        const field_mask_id = try cg.constInt(host_int_ty, field_mask);
+        const masked = try cg.buildBinary(
+            .OpBitwiseAnd,
+            cg.temporary(host_int_ty, extended),
+            cg.temporary(host_int_ty, field_mask_id),
+        );
         const bit_offset_id = try cg.constInt(host_int_ty, bit_offset);
-        const shifted_val = try cg.buildBinary(.OpShiftLeftLogical, .{ .scalar_ty = host_int_ty, .value = .{ .singleton = extended } }, .{ .scalar_ty = host_int_ty, .value = .{ .singleton = bit_offset_id } });
+        const shifted_val = try cg.buildBinary(.OpShiftLeftLogical, masked, .{ .scalar_ty = host_int_ty, .value = .{ .singleton = bit_offset_id } });
         const combined = try cg.buildBinary(.OpBitwiseOr, cleared, shifted_val);
         const combined_id = try combined.materialize(cg);
 
@@ -7201,7 +7214,7 @@ fn structFieldPtr(
             return cg.accessChain(result_ptr_ty_id, object_ptr, &.{field_index});
         },
         .@"struct" => switch (object_ty.containerLayout(zcu)) {
-            .@"packed" => return cg.todo("implement field access for packed structs", .{}),
+            .@"packed" => return object_ptr,
             .auto, .@"extern" => {
                 const member_index = cg.memberIndex(object_ty, field_index);
                 return try cg.accessChain(result_ptr_ty_id, object_ptr, &.{member_index});
