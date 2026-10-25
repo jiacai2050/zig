@@ -3335,6 +3335,7 @@ fn temporaryType(cg: *CodeGen, scalar_ty: Type, shape: Temporary.Shape) !Id {
 /// OpUConvert within floats or integers, and OpConvert{S,U}ToF or OpConvertFTo{S,U} across them.
 fn buildConvert(cg: *CodeGen, dst_ty: Type, src: Temporary) !Temporary {
     const zcu = cg.zcu;
+    const target = zcu.getTarget();
 
     const dst_scalar = dst_ty.scalarType(zcu);
     const src_scalar = src.scalar_ty;
@@ -3342,20 +3343,31 @@ fn buildConvert(cg: *CodeGen, dst_ty: Type, src: Temporary) !Temporary {
     if (dst_scalar.toIntern() == src_scalar.toIntern()) {
         return result;
     }
-    if (dst_scalar.isInt(zcu) and src_scalar.isInt(zcu)) {
-        const dst_info = dst_scalar.intInfo(zcu);
-        const src_info = src_scalar.intInfo(zcu);
-        if (cg.backingIntBits(dst_info.bits).@"0" == cg.backingIntBits(src_info.bits).@"0" and
-            dst_info.signedness == src_info.signedness)
-        {
-            return result;
-        }
+    const equal_width = dst_scalar.isInt(zcu) and src_scalar.isInt(zcu) and
+        cg.backingIntBits(dst_scalar.intInfo(zcu).bits).@"0" ==
+            cg.backingIntBits(src_scalar.intInfo(zcu).bits).@"0";
+    const signedness_changes = target.os.tag != .opencl and
+        dst_scalar.isInt(zcu) and src_scalar.isInt(zcu) and
+        dst_scalar.isSignedInt(zcu) != src_scalar.isSignedInt(zcu) and
+        !cg.backingIntBits(dst_scalar.intInfo(zcu).bits).@"1";
+    if (equal_width and !signedness_changes) {
+        return result;
     }
 
     const ops = result.instructionCount();
     const results = cg.allocIds(ops);
 
-    const op_result_ty_id = try cg.temporaryType(result.scalar_ty, if (result.shape == .unrolled) .scalar else result.shape);
+    const result_ty_id = try cg.temporaryType(result.scalar_ty, if (result.shape == .unrolled) .scalar else result.shape);
+    var op_result_ty_id = result_ty_id;
+    if (!equal_width and signedness_changes) {
+        op_result_ty_id = try cg.intType(
+            src_scalar.intInfo(zcu).signedness,
+            dst_scalar.intInfo(zcu).bits,
+        );
+        if (result.shape == .vector) {
+            op_result_ty_id = try cg.vectorType(result.shape.vector, op_result_ty_id);
+        }
+    }
 
     const opcode: Opcode = blk: {
         if (dst_scalar.isAnyFloat()) {
@@ -3367,17 +3379,26 @@ fn buildConvert(cg: *CodeGen, dst_ty: Type, src: Temporary) !Temporary {
             if (dst_scalar.isSignedInt(zcu)) break :blk .OpConvertFToS;
             break :blk .OpConvertFToU;
         }
-        if (dst_scalar.isSignedInt(zcu)) break :blk .OpSConvert;
+        if (equal_width) break :blk .OpBitcast;
+        if (src_scalar.isSignedInt(zcu)) break :blk .OpSConvert;
         break :blk .OpUConvert;
     };
 
     const op_src = try src.transform(cg, result.shape);
 
     for (0..ops) |i| {
+        const value_id = if (op_result_ty_id == result_ty_id) results.at(i) else cg.allocId();
         try cg.body.emitRaw(cg.gpa, opcode, 3);
         cg.body.writeOperand(Id, op_result_ty_id);
-        cg.body.writeOperand(Id, results.at(i));
+        cg.body.writeOperand(Id, value_id);
         cg.body.writeOperand(Id, op_src.at(i));
+        if (op_result_ty_id != result_ty_id) {
+            try cg.body.emit(cg.gpa, .OpBitcast, .{
+                .id_result_type = result_ty_id,
+                .id_result = results.at(i),
+                .operand = value_id,
+            });
+        }
     }
 
     result.value = switch (result.shape) {
@@ -6987,14 +7008,6 @@ fn airIntCast(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
             const normalized = try ci.normalize();
             return try normalized.materialize(dst_ty);
         }
-    }
-
-    if (src_info.backing_bits == dst_info.backing_bits) {
-        const result = if (dst_info.bits < src_info.bits)
-            try cg.normalize(src.pun(dst_ty.scalarType(cg.zcu)), dst_info)
-        else
-            src.pun(dst_ty.scalarType(cg.zcu));
-        return try result.materialize(cg);
     }
 
     const converted = try cg.buildConvert(dst_ty, src);
