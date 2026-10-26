@@ -164,6 +164,7 @@ pub fn tripleForTarget(allocator: Allocator, target: *const std.Target) ![]const
         .spork8,
         .x86_16,
         .xtensaeb,
+        .z80,
         => unreachable, // Gated by hasLlvmSupport().
     };
 
@@ -584,9 +585,10 @@ pub const DataLayout = struct {
             .propeller,
             .sh,
             .sheb,
+            .spork8,
             .x86_16,
             .xtensaeb,
-            .spork8,
+            .z80,
             => unreachable,
         };
     }

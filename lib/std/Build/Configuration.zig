@@ -2433,6 +2433,7 @@ pub const TargetQuery = struct {
         xcore,
         xtensa,
         xtensaeb,
+        z80,
 
         default,
 

@@ -4500,6 +4500,8 @@ pub fn toLlvmCallConvTag(cc_tag: std.lang.CallingConvention.Tag, target: *const 
         .avr_gnu,
         .bpf_std,
         .csky_sysv,
+        .z80_cet,
+        .z80_tiflags,
         .ez80_cet,
         .ez80_tiflags,
         .hexagon_sysv,
@@ -4813,6 +4815,7 @@ pub fn initializeLLVMTarget(io: Io, arch: std.Target.Cpu.Arch) void {
         .spork8,
         .x86_16,
         .xtensaeb,
+        .z80,
         => unreachable,
     }
 }

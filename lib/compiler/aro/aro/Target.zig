@@ -1084,6 +1084,7 @@ pub fn get32BitArchVariant(target: *const Target) ?Target {
         .s390x,
         .spork8,
         .ve,
+        .z80,
         => return null,
 
         .arc,
@@ -1164,6 +1165,7 @@ pub fn get64BitArchVariant(target: *const Target) ?Target {
         .xcore,
         .xtensa,
         .xtensaeb,
+        .z80,
         => return null,
 
         .aarch64_be,
@@ -1282,6 +1284,7 @@ pub fn toLLVMTriple(target: *const Target, buf: []u8) []const u8 {
         .spork8 => "spork8",
         .x86_16 => "i86",
         .xtensaeb => "xtensaeb",
+        .z80 => "z80",
     };
     writer.writeAll(llvm_arch) catch unreachable;
     writer.writeByte('-') catch unreachable;

@@ -682,9 +682,15 @@ pub const Os = struct {
                     },
                 },
                 .tios => .{
-                    .semver = .{
-                        .min = .{ .major = 5, .minor = 0, .patch = 0 },
-                        .max = .{ .major = 5, .minor = 8, .patch = 4 },
+                    .semver = switch (arch) {
+                        .z80 => .{
+                            .min = .{ .major = 1, .minor = 3, .patch = 0 },
+                            .max = .{ .major = 4, .minor = 2, .patch = 0 },
+                        },
+                        else => .{
+                            .min = .{ .major = 5, .minor = 0, .patch = 0 },
+                            .max = .{ .major = 5, .minor = 8, .patch = 4 },
+                        },
                     },
                 },
                 .vulkan => .{
@@ -1087,7 +1093,6 @@ pub fn toElfMachine(target: *const Target) std.elf.EM {
         .avr => .AVR,
         .bpfeb, .bpfel => .BPF,
         .csky => .CSKY,
-        .ez80 => .Z80,
         .hexagon => .QDSP6,
         .hppa, .hppa64 => .PARISC,
         .kvx => .KVX,
@@ -1112,6 +1117,7 @@ pub fn toElfMachine(target: *const Target) std.elf.EM {
         .x86_64 => .X86_64,
         .xcore => .XCORE,
         .xtensa, .xtensaeb => .XTENSA,
+        .z80, .ez80 => .Z80,
 
         .nvptx,
         .nvptx64,
@@ -1178,6 +1184,7 @@ pub fn toCoffMachine(target: *const Target) std.coff.IMAGE.FILE.MACHINE {
         .sparc64,
         .spirv32,
         .spirv64,
+        .spork8,
         .thumbeb,
         .ve,
         .wasm32,
@@ -1186,7 +1193,7 @@ pub fn toCoffMachine(target: *const Target) std.coff.IMAGE.FILE.MACHINE {
         .xcore,
         .xtensa,
         .xtensaeb,
-        .spork8,
+        .z80,
         => .UNKNOWN,
     };
 }
@@ -1407,6 +1414,7 @@ pub const Cpu = struct {
         xcore,
         xtensa,
         xtensaeb,
+        z80,
 
         /// An architecture family can encompass multiple architectures as represented by `Arch`.
         /// For a given family tag, it is guaranteed that an `std.Target.<tag>` namespace exists
@@ -1458,7 +1466,6 @@ pub const Cpu = struct {
                 .avr => .avr,
                 .bpfeb, .bpfel => .bpf,
                 .csky => .csky,
-                .ez80 => .z80,
                 .hexagon => .hexagon,
                 .hppa, .hppa64 => .hppa,
                 .kvx => .kvx,
@@ -1478,12 +1485,13 @@ pub const Cpu = struct {
                 .sh, .sheb => .sh,
                 .sparc, .sparc64 => .sparc,
                 .spirv32, .spirv64 => .spirv,
+                .spork8 => .spork8,
                 .ve => .ve,
                 .wasm32, .wasm64 => .wasm,
                 .x86_16, .x86, .x86_64 => .x86,
                 .xcore => .xcore,
                 .xtensa, .xtensaeb => .xtensa,
-                .spork8 => .spork8,
+                .z80, .ez80 => .z80,
             };
         }
 
@@ -1680,6 +1688,13 @@ pub const Cpu = struct {
             };
         }
 
+        pub inline fn isZ80(arch: Arch) bool {
+            return switch (arch) {
+                .z80, .ez80 => true,
+                else => false,
+            };
+        }
+
         pub fn parseCpuModel(arch: Arch, cpu_name: []const u8) ?*const Cpu.Model {
             for (arch.allCpuModels()) |cpu| {
                 if (std.mem.eql(u8, cpu_name, cpu.name)) {
@@ -1698,6 +1713,7 @@ pub const Cpu = struct {
                 .avr,
                 .bpfel,
                 .csky,
+                .ez80,
                 .hexagon,
                 .kvx,
                 .loongarch32,
@@ -1721,7 +1737,7 @@ pub const Cpu = struct {
                 .x86_64,
                 .xcore,
                 .xtensa,
-                .ez80,
+                .z80,
                 => .little,
 
                 .aarch64_be,
@@ -2011,12 +2027,16 @@ pub const Cpu = struct {
                 .spirv_mesh,
                 => &.{ .spirv32, .spirv64 },
 
+                .spork8,
+                => &.{.spork8},
+
+                .z80_cet,
+                .z80_tiflags,
+                => &.{.z80},
+
                 .ez80_cet,
                 .ez80_tiflags,
                 => &.{.ez80},
-
-                .spork8,
-                => &.{.spork8},
             };
         }
     };
@@ -2048,7 +2068,6 @@ pub const Cpu = struct {
                 .avr => &avr.cpu.avr1,
                 .bpfel, .bpfeb => &bpf.cpu.v1,
                 .csky => &csky.cpu.e2,
-                .ez80 => &z80.cpu.ez80,
                 .hexagon => &hexagon.cpu.hexagonv60,
                 .hppa => &hppa.cpu.ts_1,
                 .hppa64 => &hppa.cpu.pa_8000,
@@ -2081,6 +2100,8 @@ pub const Cpu = struct {
                 .x86_64 => &x86.cpu.x86_64,
                 .xcore => &xcore.cpu.xs1b,
                 .xtensa, .xtensaeb => &xtensa.cpu.xtensa,
+                .z80 => &z80.cpu.z80,
+                .ez80 => &z80.cpu.ez80,
                 inline else => |a| &@field(Target, @tagName(a.family())).cpu.generic,
             };
         }
@@ -3008,8 +3029,9 @@ pub fn ptrBitWidth_arch_abi(cpu_arch: Cpu.Arch, abi: Abi) u16 {
     return switch (cpu_arch) {
         .avr,
         .msp430,
-        .x86_16,
         .spork8,
+        .x86_16,
+        .z80,
         => 16,
 
         .ez80,
@@ -3085,6 +3107,7 @@ pub fn stackAlignment(target: *const Target) u16 {
     switch (target.cpu.arch) {
         .avr,
         .ez80,
+        .z80,
         => return 1,
 
         .m68k => if (target.os.tag != .netbsd) return 2,
@@ -3187,7 +3210,6 @@ pub fn cCharSignedness(target: *const Target) ?std.builtin.Signedness {
             .arc,
             .arceb,
             .csky,
-            .ez80,
             .hexagon,
             .msp430,
             .powerpc,
@@ -3280,6 +3302,12 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) ?u16 {
                 .short, .ushort, .int, .uint => 16,
                 .long, .ulong, .float => 32,
                 .double, .longdouble, .longlong, .ulonglong => 64,
+            },
+            .z80 => switch (c_type) {
+                .char => 8,
+                .short, .ushort, .int, .uint => 16,
+                .long, .ulong, .float, .double => 32,
+                .longlong, .ulonglong, .longdouble => 64,
             },
             .ez80 => switch (c_type) {
                 .char => 8,
@@ -3524,6 +3552,7 @@ pub fn cTypeAlignment(target: *const Target, c_type: CType) ?u16 {
         .avr,
         .ez80,
         .spork8,
+        .z80,
         => return 1,
         .x86 => switch (target.os.tag) {
             .windows, .uefi => switch (c_type) {
@@ -3622,6 +3651,7 @@ pub fn cTypeAlignment(target: *const Target, c_type: CType) ?u16 {
             .avr,
             .ez80,
             .spork8,
+            .z80,
             => unreachable, // Handled above.
         }),
     );
@@ -3632,6 +3662,7 @@ pub fn cMaxIntAlignment(target: *const Target) u16 {
         .avr,
         .ez80,
         .spork8,
+        .z80,
         => 1,
 
         .msp430,
@@ -3780,8 +3811,9 @@ pub fn cCallingConvention(target: *const Target) ?std.builtin.CallingConvention 
         .amdgcn => .{ .amdgcn_device = .{} },
         .nvptx, .nvptx64 => .nvptx_device,
         .spirv32, .spirv64 => .spirv_device,
-        .ez80 => .ez80_cet,
         .spork8 => .spork8,
+        .z80 => .z80_cet,
+        .ez80 => .ez80_cet,
     };
 }
 

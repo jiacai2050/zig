@@ -258,6 +258,7 @@ pub fn hasLlvmSupport(target: *const std.Target, ofmt: std.Target.ObjectFormat) 
 
         // Third-party LLVM backend exists.
         .ez80,
+        .z80,
         => false,
 
         // No LLVM backend exists.
